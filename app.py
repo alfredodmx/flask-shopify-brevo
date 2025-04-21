@@ -81,9 +81,12 @@ def receive_webhook():
         contact_data = {
             "email": email,
             "attributes": {
-                "NOMBRE_CLIENTE": first_name,
-                "APELLIDO_CLIENTE": last_name,
+                "NOMBRE": first_name,
+                "APELLIDOS": last_name,
                 "TELEFONO_WHATSAPP": phone,
+                "WHATSAPP": phone,
+                "SMS": phone,
+                "LANDLINE_NUMBER": phone,
                 "MODELO_CABANA": modelo,
                 "PRECIO_CABANA": precio,
                 "DESCRIPCION_CLIENTE": describe_lo_que_quieres,
