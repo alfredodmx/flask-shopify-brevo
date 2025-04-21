@@ -83,7 +83,7 @@ def receive_webhook():
             "attributes": {
                 "NOMBRE_CLIENTE": first_name,
                 "APELLIDO_CLIENTE": last_name,
-                "TELEFONO/WHATSAPP": phone,
+                "TELEFONO_WHATSAPP": phone,
                 "MODELO_CABANA": modelo,
                 "PRECIO_CABANA": precio,
                 "DESCRIPCION_CLIENTE": describe_lo_que_quieres,
