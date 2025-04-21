@@ -81,16 +81,16 @@ def receive_webhook():
         contact_data = {
             "email": email,
             "attributes": {
-                "FIRSTNAME": first_name,
-                "LASTNAME": last_name,
-                "PHONE": phone,
-                "MODEL": modelo,
-                "PRICE": precio,
-                "DESCRIPTION": describe_lo_que_quieres,
-                "PLANS": tengo_un_plano,  # Si 'plano' es un archivo, asegúrate de enviar la URL del archivo
-                "ADDRESS": tu_direccin_actual,
-                "BUDGET": indica_tu_presupuesto,
-                "PERSON_TYPE": tipo_de_persona
+                "NOMBRE_CLIENTE": first_name,
+                "APELLIDO_CLIENTE": last_name,
+                "TELEFONO/WHATSAPP": phone,
+                "MODELO_CABANA": modelo,
+                "PRECIO_CABANA": precio,
+                "DESCRIPCION_CLIENTE": describe_lo_que_quieres,
+                "PLANO_CLIENTE": tengo_un_plano,  # Si 'plano' es un archivo, asegúrate de enviar la URL del archivo
+                "DIRECCION_CLIENTE": tu_direccin_actual,
+                "PRESUPUESTO_CLIENTE": indica_tu_presupuesto,
+                "TIPO_DE_PERSONA": tipo_de_persona
             }
         }
 
