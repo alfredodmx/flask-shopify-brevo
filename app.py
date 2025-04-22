@@ -2,6 +2,10 @@ from flask import Flask, request, jsonify
 import requests
 import json
 import os
+from dotenv import load_dotenv
+
+# Cargar variables de entorno
+load_dotenv()
 
 app = Flask(__name__)
 
@@ -30,10 +34,19 @@ def get_customer_metafields(customer_id):
     
     if response.status_code == 200:
         metafields = response.json().get("metafields", [])
+        
         modelo = next((m["value"] for m in metafields if m["key"] == "modelo"), "Sin modelo")
         precio = next((m["value"] for m in metafields if m["key"] == "precio"), "Sin precio")
         describe_lo_que_quieres = next((m["value"] for m in metafields if m["key"] == "describe_lo_que_quieres"), "Sin descripción")
-        tengo_un_plano = next((m["value"] for m in metafields if m["key"] == "tengo_un_plano"), "Sin plano")
+        
+        # Extraer la URL del plano desde el metacampo 'tengo_un_plano'
+        plano_metafield = next((m for m in metafields if m["key"] == "tengo_un_plano"), None)
+        if plano_metafield and "value" in plano_metafield:
+            # Aquí asumimos que el valor del metacampo 'tengo_un_plano' es la URL de la imagen
+            tengo_un_plano = plano_metafield["value"]
+        else:
+            tengo_un_plano = "Sin plano"
+        
         tu_direccin_actual = next((m["value"] for m in metafields if m["key"] == "tu_direccin_actual"), "Sin dirección")
         indica_tu_presupuesto = next((m["value"] for m in metafields if m["key"] == "indica_tu_presupuesto"), "Sin presupuesto")
         tipo_de_persona = next((m["value"] for m in metafields if m["key"] == "tipo_de_persona"), "Sin persona")
@@ -90,7 +103,7 @@ def receive_webhook():
                 "MODELO_CABANA": modelo,
                 "PRECIO_CABANA": precio,
                 "DESCRIPCION_CLIENTE": describe_lo_que_quieres,
-                "PLANO_CLIENTE": tengo_un_plano,  # Si 'plano' es un archivo, asegúrate de enviar la URL del archivo
+                "PLANO_CLIENTE": tengo_un_plano,  # Ahora contiene la URL pública de la imagen
                 "DIRECCION_CLIENTE": tu_direccin_actual,
                 "PRESUPUESTO_CLIENTE": indica_tu_presupuesto,
                 "TIPO_DE_PERSONA": tipo_de_persona
