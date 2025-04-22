@@ -1,7 +1,7 @@
+from flask import Flask, request, jsonify
 import requests
 import json
 import os
-from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
@@ -17,37 +17,40 @@ if not BREVO_API_KEY or not SHOPIFY_ACCESS_TOKEN:
 # Endpoint de la API de Brevo para agregar un nuevo contacto
 BREVO_API_URL = "https://api.sendinblue.com/v3/contacts"
 
-# 📌 Función para obtener la URL pública del archivo usando GraphQL
-def get_image_url_from_graphql(customer_id):
-    graphql_url = f"https://{SHOPIFY_STORE}/admin/api/2023-10/graphql.json"
+# 📌 Función para obtener la URL pública del archivo desde el ID de imagen de Shopify
+def get_image_url_from_shopify(image_gid):
+    print(f"🔍 Obteniendo URL para el archivo con ID: {image_gid}")
+    
+    # URL de la API de archivos de Shopify para obtener las imágenes de productos
+    shopify_url = f"https://{SHOPIFY_STORE}/admin/api/2023-10/products.json"
     
     headers = {
         "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
         "Content-Type": "application/json"
     }
 
-    # Consulta GraphQL para obtener la URL de la imagen desde el metacampo
-    query = """
-    {
-      customer(id: "gid://shopify/Customer/""" + str(customer_id) + """" ) {
-        metafields(namespace: "your_namespace", key: "tengo_un_plano") {
-          value
-        }
-      }
-    }
-    """
-
-    response = requests.post(graphql_url, json={"query": query}, headers=headers)
+    response = requests.get(shopify_url, headers=headers)
     
     if response.status_code == 200:
-        data = response.json()
-        # Extraer el valor (URL) del metacampo
-        metafield_value = data.get('data', {}).get('customer', {}).get('metafields', [{}])[0].get('value', 'Sin URL')
+        # Revisamos la respuesta y extraemos la URL del archivo
+        products = response.json().get("products", [])
         
-        print(f"🔍 URL del archivo: {metafield_value}")
-        return metafield_value
+        # Depuración para verificar los productos y sus imágenes
+        print("🔍 Productos disponibles:", json.dumps(products, indent=4))
+        
+        # Buscar la imagen que corresponda con el ID recibido
+        for product in products:
+            for image in product.get("images", []):
+                if image.get("id") == image_gid:
+                    # Si encontramos el archivo, obtenemos la URL pública
+                    file_url = image.get("src", "Sin URL")
+                    print(f"🔍 URL pública de la imagen: {file_url}")
+                    return file_url
+        
+        print("❌ No se encontró el archivo con ese ID en los productos.")
+        return "Sin URL"
     else:
-        print(f"❌ Error obteniendo la URL del archivo: {response.text}")
+        print(f"❌ Error obteniendo la URL del archivo de Shopify: {response.text}")
         return "Sin URL"
 
 # 📌 Función para obtener los metacampos de un cliente en Shopify
@@ -72,7 +75,7 @@ def get_customer_metafields(customer_id):
         if plano_metafield and "value" in plano_metafield:
             image_gid = plano_metafield["value"]
             print(f"🔍 ID de la imagen (gid) extraído: {image_gid}")  # Depuración del gid de la imagen
-            tengo_un_plano = get_image_url_from_graphql(customer_id)  # Usar GraphQL para obtener la URL pública de la imagen
+            tengo_un_plano = get_image_url_from_shopify(image_gid)  # Usar la función actualizada para obtener la URL pública de la imagen
         else:
             tengo_un_plano = "Sin plano"
         
