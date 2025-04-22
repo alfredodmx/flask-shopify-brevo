@@ -2,10 +2,6 @@ from flask import Flask, request, jsonify
 import requests
 import json
 import os
-from dotenv import load_dotenv
-
-# Cargar variables de entorno
-load_dotenv()
 
 app = Flask(__name__)
 
@@ -34,15 +30,14 @@ def get_customer_metafields(customer_id):
     
     if response.status_code == 200:
         metafields = response.json().get("metafields", [])
-        
         modelo = next((m["value"] for m in metafields if m["key"] == "modelo"), "Sin modelo")
         precio = next((m["value"] for m in metafields if m["key"] == "precio"), "Sin precio")
         describe_lo_que_quieres = next((m["value"] for m in metafields if m["key"] == "describe_lo_que_quieres"), "Sin descripción")
         
-        # Extraer la URL del plano desde el metacampo 'tengo_un_plano'
+        # Obtener el metacampo 'tengo_un_plano' (el que contiene la imagen)
         plano_metafield = next((m for m in metafields if m["key"] == "tengo_un_plano"), None)
         if plano_metafield and "value" in plano_metafield:
-            # Aquí asumimos que el valor del metacampo 'tengo_un_plano' es la URL de la imagen
+            # Asumimos que el valor del metacampo 'tengo_un_plano' es la URL pública de la imagen
             tengo_un_plano = plano_metafield["value"]
         else:
             tengo_un_plano = "Sin plano"
