@@ -17,12 +17,12 @@ if not BREVO_API_KEY or not SHOPIFY_ACCESS_TOKEN:
 # Endpoint de la API de Brevo para agregar un nuevo contacto
 BREVO_API_URL = "https://api.sendinblue.com/v3/contacts"
 
-# 📌 Función para obtener la URL pública del archivo desde el ID
-def get_image_url_from_shopify(image_gid):
-    print(f"🔍 Obteniendo URL para el archivo con ID: {image_gid}")
+# 📌 Función para obtener la URL pública del archivo desde el ID de imagen en productos
+def get_image_url_from_shopify(product_id):
+    print(f"🔍 Obteniendo URL para el producto con ID: {product_id}")
     
-    # URL de la API de archivos de Shopify (endpoint general para acceder a archivos)
-    shopify_url = f"https://{SHOPIFY_STORE}/admin/api/2023-10/files.json"  # Reemplaza esta URL con la URL de la API de archivos correcta
+    # URL de la API de Shopify para obtener las imágenes del producto
+    shopify_url = f"https://{SHOPIFY_STORE}/admin/api/2023-10/products/{product_id}/images.json"
     
     headers = {
         "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
@@ -32,18 +32,17 @@ def get_image_url_from_shopify(image_gid):
     response = requests.get(shopify_url, headers=headers)
     
     if response.status_code == 200:
-        # Revisamos la respuesta y extraemos la URL del archivo
-        files = response.json().get("files", [])
+        # Revisamos la respuesta y extraemos la URL de la imagen
+        images = response.json().get("images", [])
         
-        # Buscar el archivo que corresponda con el ID recibido
-        for file in files:
-            if file.get("id") == image_gid:
-                file_url = file.get("url", "Sin URL")
-                print(f"🔍 URL pública de la imagen: {file_url}")
-                return file_url
-        
-        print("❌ No se encontró el archivo con ese ID.")
-        return "Sin URL"
+        # Buscar la URL de la imagen (suponemos que la primera imagen es la correcta)
+        if images:
+            image_url = images[0].get("src", "Sin URL")
+            print(f"🔍 URL pública de la imagen: {image_url}")
+            return image_url
+        else:
+            print("❌ No se encontraron imágenes para este producto.")
+            return "Sin URL"
     else:
         print(f"❌ Error obteniendo la URL del archivo de Shopify: {response.text}")
         return "Sin URL"
@@ -68,10 +67,10 @@ def get_customer_metafields(customer_id):
         # Obtener el metacampo 'tengo_un_plano' (el que contiene la imagen)
         plano_metafield = next((m for m in metafields if m["key"] == "tengo_un_plano"), None)
         if plano_metafield and "value" in plano_metafield:
-            # Asumimos que el valor del metacampo 'tengo_un_plano' es el ID del archivo (gid://shopify/MediaImage/{ID})
-            image_gid = plano_metafield["value"]
-            print(f"🔍 ID de la imagen (gid) extraído: {image_gid}")  # Depuración del gid de la imagen
-            tengo_un_plano = get_image_url_from_shopify(image_gid)  # Obtener la URL pública de la imagen
+            # Asumimos que el valor del metacampo 'tengo_un_plano' es el ID del producto
+            product_id = plano_metafield["value"]
+            print(f"🔍 ID del producto extraído: {product_id}")  # Depuración del ID del producto
+            tengo_un_plano = get_image_url_from_shopify(product_id)  # Obtener la URL pública de la imagen del producto
         else:
             tengo_un_plano = "Sin plano"
         
