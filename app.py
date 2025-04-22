@@ -17,6 +17,26 @@ if not BREVO_API_KEY or not SHOPIFY_ACCESS_TOKEN:
 # Endpoint de la API de Brevo para agregar un nuevo contacto
 BREVO_API_URL = "https://api.sendinblue.com/v3/contacts"
 
+# 📌 Función para obtener la URL pública de la imagen desde el ID del archivo
+def get_image_url_from_shopify(image_id):
+    # URL de la API de archivos de Shopify
+    shopify_url = f"https://{SHOPIFY_STORE}/admin/api/2023-10/files/{image_id}.json"
+    
+    headers = {
+        "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+        "Content-Type": "application/json"
+    }
+
+    response = requests.get(shopify_url, headers=headers)
+    
+    if response.status_code == 200:
+        file_data = response.json().get("file", {})
+        file_url = file_data.get("url", "Sin URL")
+        return file_url
+    else:
+        print("❌ Error obteniendo la URL del archivo de Shopify:", response.text)
+        return "Sin URL"
+
 # 📌 Función para obtener los metacampos de un cliente en Shopify
 def get_customer_metafields(customer_id):
     shopify_url = f"https://{SHOPIFY_STORE}/admin/api/2023-10/customers/{customer_id}/metafields.json"
@@ -37,8 +57,9 @@ def get_customer_metafields(customer_id):
         # Obtener el metacampo 'tengo_un_plano' (el que contiene la imagen)
         plano_metafield = next((m for m in metafields if m["key"] == "tengo_un_plano"), None)
         if plano_metafield and "value" in plano_metafield:
-            # Asumimos que el valor del metacampo 'tengo_un_plano' es la URL pública de la imagen
-            tengo_un_plano = plano_metafield["value"]
+            # Asumimos que el valor del metacampo 'tengo_un_plano' es el ID del archivo
+            image_id = plano_metafield["value"].split("/")[-1]  # Obtener el ID de la imagen (por ejemplo: 27194235715618)
+            tengo_un_plano = get_image_url_from_shopify(image_id)  # Obtener la URL pública de la imagen
         else:
             tengo_un_plano = "Sin plano"
         
