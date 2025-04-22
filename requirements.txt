@@ -2,4 +2,4 @@ Flask==2.2.3
 requests==2.28.2
 python-dotenv==0.20.0
 gunicorn==20.1.0
-werkzeug==2.0.3  # Aseguramos que werkzeug sea compatible con Flask 2.2.3
+werkzeug>=2.2.2  # Aseguramos que werkzeug sea compatible con Flask 2.2.3
