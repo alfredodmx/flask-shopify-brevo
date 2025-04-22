@@ -1,3 +1,23 @@
+from flask import Flask, request, jsonify
+import requests
+import json
+import os
+
+# 🔑 Crear la instancia de Flask
+app = Flask(__name__)
+
+# 🔑 Obtener API Key de Brevo y Shopify desde variables de entorno
+BREVO_API_KEY = os.getenv("BREVO_API_KEY")
+SHOPIFY_ACCESS_TOKEN = os.getenv("SHOPIFY_ACCESS_TOKEN")  # Agregamos la API Key de Shopify
+SHOPIFY_STORE = "uaua8v-s7.myshopify.com"  # Reemplaza con tu dominio real de Shopify
+
+if not BREVO_API_KEY or not SHOPIFY_ACCESS_TOKEN:
+    print("❌ ERROR: Las API Keys no están configuradas. Asegúrate de definir 'BREVO_API_KEY' y 'SHOPIFY_ACCESS_TOKEN'.")
+    exit(1)
+
+# Endpoint de la API de Brevo para agregar un nuevo contacto
+BREVO_API_URL = "https://api.sendinblue.com/v3/contacts"
+
 # 📌 Función para obtener la URL pública de la imagen desde el ID del archivo
 def get_image_url_from_shopify(image_id):
     print(f"🔍 Obteniendo URL para el archivo con ID: {image_id}")
