@@ -17,26 +17,28 @@ if not BREVO_API_KEY or not SHOPIFY_ACCESS_TOKEN:
 # Endpoint de la API de Brevo para agregar un nuevo contacto
 BREVO_API_URL = "https://api.sendinblue.com/v3/contacts"
 
-# 📌 Función para obtener la URL de la imagen directamente desde el metacampo 'tengo_un_plano'
-def get_image_url_from_metafield(metafield_value):
+# 📌 Función para obtener la URL pública de la imagen usando el ID del archivo
+def get_image_url_from_gid(image_gid):
     """
-    Usamos el ID del metafield (gid) para obtener la URL pública del archivo.
+    Dado un 'gid' (como 'gid://shopify/MediaImage/27200526417954'),
+    esta función consulta Shopify para obtener la URL pública del archivo.
     """
-    # Extraemos el ID de la imagen del metafield (ID dentro del 'gid://shopify/MediaImage/')
-    image_gid = metafield_value.split("://")[-1]  # Obtener la parte después de 'gid://shopify/MediaImage/'
-
-    # Hacemos la consulta para obtener la URL pública del archivo en Shopify
-    shopify_url = f"https://{SHOPIFY_STORE}/admin/api/2023-10/media/{image_gid}.json"
+    # Extraemos el ID del archivo de Shopify del 'gid'
+    media_id = image_gid.split("/")[-1]
+    
+    # Hacemos una consulta a la API de Shopify para obtener los detalles del archivo
+    shopify_url = f"https://{SHOPIFY_STORE}/admin/api/2023-10/media/{media_id}.json"
     
     headers = {
         "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
         "Content-Type": "application/json"
     }
 
+    # Realizamos la solicitud a Shopify
     response = requests.get(shopify_url, headers=headers)
 
     if response.status_code == 200:
-        # Extraer la URL de la imagen del JSON de respuesta
+        # Extraemos la URL de la respuesta
         data = response.json()
         if "media" in data and "src" in data["media"]:
             image_url = data["media"]["src"]
@@ -66,12 +68,12 @@ def get_customer_metafields(customer_id):
         precio = next((m["value"] for m in metafields if m["key"] == "precio"), "Sin precio")
         describe_lo_que_quieres = next((m["value"] for m in metafields if m["key"] == "describe_lo_que_quieres"), "Sin descripción")
         
-        # Obtener el metacampo 'tengo_un_plano' (que contiene el ID del archivo)
+        # Obtener el metacampo 'tengo_un_plano' (que contiene el 'gid' de la imagen)
         plano_metafield = next((m for m in metafields if m["key"] == "tengo_un_plano"), None)
         if plano_metafield and "value" in plano_metafield:
             metafield_value = plano_metafield["value"]
             print(f"🔍 Metafield extraído: {metafield_value}")
-            tengo_un_plano = get_image_url_from_metafield(metafield_value)  # Generamos la URL pública de la imagen
+            tengo_un_plano = get_image_url_from_gid(metafield_value)  # Generamos la URL pública de la imagen
         else:
             tengo_un_plano = "Sin plano"
         
