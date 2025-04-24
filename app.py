@@ -36,14 +36,14 @@ def get_image_url_from_gid(image_gid):
     
     query = """
     {
-        media(id: "gid://shopify/MediaImage/{media_id}") {
-            mediaContentType
-            preview {
-                image {
-                    src
-                }
-            }
+      media(id: "gid://shopify/MediaImage/{media_id}") {
+        mediaContentType
+        preview {
+          image {
+            src
+          }
         }
+      }
     }
     """.format(media_id=media_id)
     
