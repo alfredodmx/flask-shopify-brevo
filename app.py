@@ -16,6 +16,7 @@ if not BREVO_API_KEY or not SHOPIFY_ACCESS_TOKEN:
 
 # Endpoint de la API de Brevo para agregar un nuevo contacto
 BREVO_API_URL = "https://api.sendinblue.com/v3/contacts"
+BREVO_GET_CONTACT_API_URL = "https://api.sendinblue.com/v3/contacts/{email}"
 
 # 📌 Función para obtener los metacampos de un cliente en Shopify
 def get_customer_metafields(customer_id):
@@ -30,8 +31,6 @@ def get_customer_metafields(customer_id):
     
     if response.status_code == 200:
         metafields = response.json().get("metafields", [])
-
-        # Validación de los valores, se asigna "Sin valor" si no se encuentra el metacampo
         modelo = next((m["value"] for m in metafields if m["key"] == "modelo"), "Sin modelo")
         precio = next((m["value"] for m in metafields if m["key"] == "precio"), "Sin precio")
         describe_lo_que_quieres = next((m["value"] for m in metafields if m["key"] == "describe_lo_que_quieres"), "Sin descripción")
@@ -79,44 +78,74 @@ def receive_webhook():
         # Verificar que los metacampos no estén vacíos
         print("Valores de metacampos:", modelo, precio, describe_lo_que_quieres, tengo_un_plano, tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona)
 
-        # 📌 Crear el contacto con los metacampos incluidos
-        contact_data = {
-            "email": email,
-            "attributes": {
-                "NOMBRE": first_name,
-                "APELLIDOS": last_name,
-                "TELEFONO_WHATSAPP": phone,
-                "WHATSAPP": phone,
-                "SMS": phone,
-                "LANDLINE_NUMBER": phone,
-                "MODELO_CABANA": modelo,
-                "PRECIO_CABANA": precio,
-                "DESCRIPCION_CLIENTE": describe_lo_que_quieres,
-                "PLANO_CLIENTE": tengo_un_plano,  # Si 'plano' es un archivo, asegúrate de enviar la URL del archivo
-                "DIRECCION_CLIENTE": tu_direccin_actual,
-                "PRESUPUESTO_CLIENTE": indica_tu_presupuesto,
-                "TIPO_DE_PERSONA": tipo_de_persona
-            }
-        }
-
+        # 📌 Verificar si el contacto ya existe en Brevo
         headers = {
             "api-key": BREVO_API_KEY,
             "Content-Type": "application/json"
         }
 
-        # 🚀 Imprimir qué datos se están enviando a Brevo
-        print("📤 Enviando datos a Brevo:", json.dumps(contact_data, indent=4))
-
-        # 🚀 Enviar los datos a Brevo
-        response = requests.post(BREVO_API_URL, json=contact_data, headers=headers)
-
-        # 🔍 Imprimir la respuesta de Brevo
-        print("🔍 Respuesta de Brevo:", response.status_code, response.text)
+        response = requests.get(BREVO_GET_CONTACT_API_URL.format(email=email), headers=headers)
 
         if response.status_code == 200:
-            return jsonify({"message": "Contacto creado en Brevo con metacampos"}), 200
+            # Si el contacto ya existe, podemos optar por actualizarlo
+            print(f"⚠️ El contacto con el correo {email} ya existe en Brevo. Se actualizará.")
+            contact_data = {
+                "email": email,
+                "attributes": {
+                    "NOMBRE": first_name,
+                    "APELLIDOS": last_name,
+                    "TELEFONO_WHATSAPP": phone,
+                    "WHATSAPP": phone,
+                    "SMS": phone,
+                    "LANDLINE_NUMBER": phone,
+                    "MODELO_CABANA": modelo,
+                    "PRECIO_CABANA": precio,
+                    "DESCRIPCION_CLIENTE": describe_lo_que_quieres,
+                    "PLANO_CLIENTE": tengo_un_plano,  # Si 'plano' es un archivo, asegúrate de enviar la URL del archivo
+                    "DIRECCION_CLIENTE": tu_direccin_actual,
+                    "PRESUPUESTO_CLIENTE": indica_tu_presupuesto,
+                    "TIPO_DE_PERSONA": tipo_de_persona
+                }
+            }
+
+            # Actualizamos los datos del contacto existente
+            update_response = requests.put(BREVO_GET_CONTACT_API_URL.format(email=email), json=contact_data, headers=headers)
+
+            if update_response.status_code == 200:
+                return jsonify({"message": "Contacto actualizado en Brevo"}), 200
+            else:
+                return jsonify({"error": "No se pudo actualizar el contacto en Brevo", "details": update_response.text}), 400
+        elif response.status_code == 404:
+            # Si el contacto no existe, creamos uno nuevo
+            print(f"✅ El contacto con el correo {email} no existe. Se creará uno nuevo.")
+            contact_data = {
+                "email": email,
+                "attributes": {
+                    "NOMBRE": first_name,
+                    "APELLIDOS": last_name,
+                    "TELEFONO_WHATSAPP": phone,
+                    "WHATSAPP": phone,
+                    "SMS": phone,
+                    "LANDLINE_NUMBER": phone,
+                    "MODELO_CABANA": modelo,
+                    "PRECIO_CABANA": precio,
+                    "DESCRIPCION_CLIENTE": describe_lo_que_quieres,
+                    "PLANO_CLIENTE": tengo_un_plano,  # Si 'plano' es un archivo, asegúrate de enviar la URL del archivo
+                    "DIRECCION_CLIENTE": tu_direccin_actual,
+                    "PRESUPUESTO_CLIENTE": indica_tu_presupuesto,
+                    "TIPO_DE_PERSONA": tipo_de_persona
+                }
+            }
+
+            # 🚀 Enviar los datos a Brevo para crear el nuevo contacto
+            create_response = requests.post(BREVO_API_URL, json=contact_data, headers=headers)
+
+            if create_response.status_code == 200:
+                return jsonify({"message": "Contacto creado en Brevo con metacampos"}), 200
+            else:
+                return jsonify({"error": "No se pudo crear el contacto en Brevo", "details": create_response.text}), 400
         else:
-            return jsonify({"error": "No se pudo crear el contacto en Brevo", "details": response.text}), 400
+            return jsonify({"error": "Error al verificar si el contacto existe", "details": response.text}), 400
 
     except Exception as e:
         print("❌ ERROR procesando el webhook:", str(e))
