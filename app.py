@@ -1,6 +1,12 @@
+from flask import Flask, request, jsonify
 import requests
 import json
 import os
+
+# Crear la instancia de Flask
+app = Flask(__name__)
+
+# Aquí va el resto de tu código de Flask
 
 # Obtener claves API de las variables de entorno
 SHOPIFY_ACCESS_TOKEN = os.getenv("SHOPIFY_ACCESS_TOKEN")
