@@ -27,7 +27,20 @@ def get_image_url_from_gid(image_gid):
     media_id = image_gid.split("/")[-1]
     
     # Hacemos una consulta a la API de Shopify para obtener los detalles del archivo
-    shopify_url = f"https://{SHOPIFY_STORE}/admin/api/2023-10/media/{media_id}.json"
+    shopify_url = f"https://{SHOPIFY_STORE}/admin/api/2023-10/graphql.json"
+    
+    query = """
+    {
+        media(id: "gid://shopify/MediaImage/{media_id}") {
+            mediaContentType
+            preview {
+                image {
+                    src
+                }
+            }
+        }
+    }
+    """.format(media_id=media_id)
     
     headers = {
         "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
@@ -35,13 +48,12 @@ def get_image_url_from_gid(image_gid):
     }
 
     # Realizamos la solicitud a Shopify
-    response = requests.get(shopify_url, headers=headers)
+    response = requests.post(shopify_url, json={"query": query}, headers=headers)
 
     if response.status_code == 200:
-        # Extraemos la URL de la respuesta
         data = response.json()
-        if "media" in data and "src" in data["media"]:
-            image_url = data["media"]["src"]
+        if "data" in data and "media" in data["data"] and data["data"]["media"]:
+            image_url = data["data"]["media"]["preview"]["image"]["src"]
             print(f"🔍 URL de la imagen obtenida: {image_url}")
             return image_url
         else:
