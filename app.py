@@ -17,41 +17,14 @@ if not BREVO_API_KEY or not SHOPIFY_ACCESS_TOKEN:
 # Endpoint de la API de Brevo para agregar un nuevo contacto
 BREVO_API_URL = "https://api.sendinblue.com/v3/contacts"
 
-# 📌 Función para obtener la URL pública del archivo desde el ID de imagen de Shopify
-def get_image_url_from_shopify(image_gid):
-    print(f"🔍 Obteniendo URL para el archivo con ID: {image_gid}")
+# 📌 Función para construir la URL pública de la imagen
+def get_image_url_from_shopify(image_filename):
+    # Construimos la URL pública de la imagen
+    file_url = f"https://cdn.shopify.com/s/files/1/0787/8931/2546/files/{image_filename}?v=1745290532"
     
-    # URL de la API de archivos de Shopify para obtener las imágenes de productos
-    shopify_url = f"https://{SHOPIFY_STORE}/admin/api/2023-10/products.json"
-    
-    headers = {
-        "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
-        "Content-Type": "application/json"
-    }
-
-    response = requests.get(shopify_url, headers=headers)
-    
-    if response.status_code == 200:
-        # Revisamos la respuesta y extraemos la URL del archivo
-        products = response.json().get("products", [])
-        
-        # Depuración para verificar los productos y sus imágenes
-        print("🔍 Productos disponibles:", json.dumps(products, indent=4))
-        
-        # Buscar la imagen que corresponda con el ID recibido
-        for product in products:
-            for image in product.get("images", []):
-                if image.get("id") == image_gid:
-                    # Si encontramos el archivo, obtenemos la URL pública
-                    file_url = image.get("src", "Sin URL")
-                    print(f"🔍 URL pública de la imagen: {file_url}")
-                    return file_url
-        
-        print("❌ No se encontró el archivo con ese ID en los productos.")
-        return "Sin URL"
-    else:
-        print(f"❌ Error obteniendo la URL del archivo de Shopify: {response.text}")
-        return "Sin URL"
+    # Mostramos la URL completa para depuración
+    print(f"🔍 URL pública de la imagen: {file_url}")
+    return file_url
 
 # 📌 Función para obtener los metacampos de un cliente en Shopify
 def get_customer_metafields(customer_id):
@@ -70,12 +43,12 @@ def get_customer_metafields(customer_id):
         precio = next((m["value"] for m in metafields if m["key"] == "precio"), "Sin precio")
         describe_lo_que_quieres = next((m["value"] for m in metafields if m["key"] == "describe_lo_que_quieres"), "Sin descripción")
         
-        # Obtener el metacampo 'tengo_un_plano' (el que contiene la imagen)
+        # Obtener el metacampo 'tengo_un_plano' (el que contiene el nombre del archivo)
         plano_metafield = next((m for m in metafields if m["key"] == "tengo_un_plano"), None)
         if plano_metafield and "value" in plano_metafield:
-            image_gid = plano_metafield["value"]
-            print(f"🔍 ID de la imagen (gid) extraído: {image_gid}")  # Depuración del gid de la imagen
-            tengo_un_plano = get_image_url_from_shopify(image_gid)  # Usar la función actualizada para obtener la URL pública de la imagen
+            image_filename = plano_metafield["value"]
+            print(f"🔍 Nombre del archivo extraído: {image_filename}")  # Depuración del nombre del archivo
+            tengo_un_plano = get_image_url_from_shopify(image_filename)  # Generamos la URL completa de la imagen
         else:
             tengo_un_plano = "Sin plano"
         
