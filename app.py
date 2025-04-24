@@ -5,7 +5,7 @@ import os
 
 app = Flask(__name__)
 
-# 🔑 Obtener API Key de Brevo y Shopify desde variables de entorno
+# Obtener API Keys desde las variables de entorno
 BREVO_API_KEY = os.getenv("BREVO_API_KEY")
 SHOPIFY_ACCESS_TOKEN = os.getenv("SHOPIFY_ACCESS_TOKEN")
 SHOPIFY_STORE = "uaua8v-s7.myshopify.com"  # Reemplaza con tu dominio real de Shopify
@@ -17,7 +17,7 @@ if not BREVO_API_KEY or not SHOPIFY_ACCESS_TOKEN:
 # Endpoint de la API de Brevo para agregar un nuevo contacto
 BREVO_API_URL = "https://api.sendinblue.com/v3/contacts"
 
-# 📌 Función para obtener los metacampos de un cliente en Shopify
+# Función para obtener los metacampos de un cliente en Shopify
 def get_customer_metafields(customer_id):
     shopify_url = f"https://{SHOPIFY_STORE}/admin/api/2023-10/customers/{customer_id}/metafields.json"
     
@@ -30,25 +30,29 @@ def get_customer_metafields(customer_id):
     
     if response.status_code == 200:
         metafields = response.json().get("metafields", [])
-        # Extraer el file_reference (imagen)
+        # Buscar el metafield de tipo file_reference para obtener la imagen
         file_reference = next((m["value"] for m in metafields if m["key"] == "tengo_un_plano"), None)
         
         if file_reference:
-            # Llamada a la API de Shopify para obtener la URL pública de la imagen
+            # Llamar a la API de Shopify para obtener la URL pública de la imagen
             image_url = get_image_url_from_file_reference(file_reference)
-            return image_url
+            if image_url:
+                return image_url
+            else:
+                print("❌ No se pudo obtener la URL de la imagen del archivo.")
+                return "Sin URL"
         else:
-            print("❌ No se encontró file_reference en los metacampos")
-            return None
+            print("❌ No se encontró el file_reference en los metacampos")
+            return "Sin URL"
     else:
         print("❌ Error obteniendo metacampos de Shopify:", response.text)
-        return None
+        return "Sin URL"
 
-# 📌 Función para obtener la URL pública de una imagen desde el file_reference
+# Función para obtener la URL pública de la imagen desde el file_reference
 def get_image_url_from_file_reference(file_reference):
-    # Verifica que el GID sea correcto
+    # Verificar que el GID sea válido
     if not file_reference.startswith("gid://shopify/MediaImage/"):
-        print("❌ El file_reference no es válido.")
+        print("❌ El file_reference no tiene el formato esperado.")
         return None
 
     file_id = file_reference.split("/")[-1]  # Obtener solo el ID del archivo del GID
@@ -69,10 +73,10 @@ def get_image_url_from_file_reference(file_reference):
             print("❌ No se encontró la URL pública del archivo.")
             return None
     else:
-        print("❌ Error obteniendo la URL del archivo:", response.text)
+        print(f"❌ Error al obtener la URL del archivo: {response.text}")
         return None
 
-# 📩 Ruta del webhook que Shopify enviará a esta API
+# Ruta del webhook que Shopify enviará a esta API
 @app.route('/webhook/shopify', methods=['POST'])
 def receive_webhook():
     try:
@@ -99,7 +103,7 @@ def receive_webhook():
             print("❌ ERROR: No se recibió un email o ID de cliente válido.")
             return jsonify({"error": "Falta email o ID de cliente"}), 400
 
-        # 🔍 Obtener los metacampos desde Shopify
+        # Obtener los metacampos desde Shopify
         image_url = get_customer_metafields(customer_id)
 
         if image_url:
@@ -108,7 +112,7 @@ def receive_webhook():
             print("❌ ERROR: No se pudo obtener la URL de la imagen.")
             image_url = "Sin URL"
 
-        # 📌 Crear el contacto con los metacampos incluidos
+        # Crear el contacto con los metacampos incluidos
         contact_data = {
             "email": email,
             "attributes": {
@@ -127,10 +131,10 @@ def receive_webhook():
             "Content-Type": "application/json"
         }
 
-        # 🚀 Enviar los datos a Brevo
+        # Enviar los datos a Brevo
         response = requests.post(BREVO_API_URL, json=contact_data, headers=headers)
 
-        # 🔍 Imprimir la respuesta de Brevo
+        # Imprimir la respuesta de Brevo
         print("🔍 Respuesta de Brevo:", response.status_code, response.text)
 
         if response.status_code == 200:
@@ -142,7 +146,7 @@ def receive_webhook():
         print("❌ ERROR procesando el webhook:", str(e))
         return jsonify({"error": "Error interno"}), 500
 
-# 🔥 Iniciar el servidor en Render
+# Iniciar el servidor en Render
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
