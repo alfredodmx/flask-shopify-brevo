@@ -17,25 +17,21 @@ if not BREVO_API_KEY or not SHOPIFY_ACCESS_TOKEN:
 # Endpoint de la API de Brevo para agregar un nuevo contacto
 BREVO_API_URL = "https://api.sendinblue.com/v3/contacts"
 
-# 📌 Función para obtener la URL pública de la imagen usando el ID del archivo (solo si es de tipo file)
+# 📌 Función para obtener la URL de la imagen usando GraphQL en Shopify
 def get_image_url_from_gid(image_gid):
     """
-    Dado un 'gid' (como 'gid://shopify/MediaImage/27200526417954'),
-    esta función consulta Shopify para obtener la URL pública del archivo.
+    Esta función obtiene la URL pública de una imagen usando su gid de Shopify.
     """
-    # Extraemos el ID del archivo de Shopify del 'gid' (esto elimina la parte "gid://shopify/MediaImage/")
+    # Extraer el ID de la imagen del 'gid' (formato: gid://shopify/MediaImage/{id})
     media_id = image_gid.split("/")[-1]
     
-    # Verificar si el 'media_id' tiene el formato correcto (debe ser un número)
     if not media_id.isdigit():
-        print(f"❌ Error: El 'media_id' extraído no es válido: {media_id}")
+        print(f"❌ Error: El media_id extraído no es válido: {media_id}")
         return "Sin URL"
-
-    # Hacemos una consulta a la API de Shopify para obtener los detalles del archivo
-    shopify_url = f"https://{SHOPIFY_STORE}/admin/api/2023-10/graphql.json"
     
+    shopify_url = f"https://{SHOPIFY_STORE}/admin/api/2023-10/graphql.json"
     query = """
-    {
+    query {
       media(id: "gid://shopify/MediaImage/{media_id}") {
         mediaContentType
         preview {
@@ -46,18 +42,18 @@ def get_image_url_from_gid(image_gid):
       }
     }
     """.format(media_id=media_id)
-    
+
     headers = {
         "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
         "Content-Type": "application/json"
     }
 
-    # Realizamos la solicitud a Shopify
+    # Realizamos la solicitud a Shopify para obtener la URL de la imagen
     response = requests.post(shopify_url, json={"query": query}, headers=headers)
 
     if response.status_code == 200:
         data = response.json()
-        if "data" in data and "media" in data["data"] and data["data"]["media"]:
+        if "data" in data and "media" in data["data"]:
             image_url = data["data"]["media"]["preview"]["image"]["src"]
             print(f"🔍 URL de la imagen obtenida: {image_url}")
             return image_url
