@@ -17,7 +17,7 @@ if not BREVO_API_KEY or not SHOPIFY_ACCESS_TOKEN:
 # Endpoint de la API de Brevo para agregar un nuevo contacto
 BREVO_API_URL = "https://api.sendinblue.com/v3/contacts"
 
-# 📌 Función para obtener la URL pública de la imagen usando el ID del archivo
+# 📌 Función para obtener la URL pública de la imagen usando el ID del archivo (solo si es de tipo file)
 def get_image_url_from_gid(image_gid):
     """
     Dado un 'gid' (como 'gid://shopify/MediaImage/27200526417954'),
