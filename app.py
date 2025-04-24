@@ -17,31 +17,66 @@ if not BREVO_API_KEY or not SHOPIFY_ACCESS_TOKEN:
 # Endpoint de la API de Brevo para agregar un nuevo contacto
 BREVO_API_URL = "https://api.sendinblue.com/v3/contacts"
 
-# 📌 Función para obtener la URL del archivo desde Shopify Files
-def get_file_url(file_reference):
-    # Crear la URL de la API de Shopify para obtener el archivo
-    shopify_url = f"https://{SHOPIFY_STORE}/admin/api/2023-10/files.json"
+# 📌 Función para obtener los metacampos de un cliente en Shopify
+def get_customer_metafields(customer_id):
+    shopify_url = f"https://{SHOPIFY_STORE}/admin/api/2023-10/customers/{customer_id}/metafields.json"
+    
+    headers = {
+        "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+        "Content-Type": "application/json"
+    }
+
+    response = requests.get(shopify_url, headers=headers)
+    
+    if response.status_code == 200:
+        metafields = response.json().get("metafields", [])
+        modelo = next((m["value"] for m in metafields if m["key"] == "modelo"), "Sin modelo")
+        precio = next((m["value"] for m in metafields if m["key"] == "precio"), "Sin precio")
+        describe_lo_que_quieres = next((m["value"] for m in metafields if m["key"] == "describe_lo_que_quieres"), "Sin descripción")
+        tengo_un_plano = next((m["value"] for m in metafields if m["key"] == "tengo_un_plano"), "Sin plano")
+        tu_direccin_actual = next((m["value"] for m in metafields if m["key"] == "tu_direccin_actual"), "Sin dirección")
+        indica_tu_presupuesto = next((m["value"] for m in metafields if m["key"] == "indica_tu_presupuesto"), "Sin presupuesto")
+        tipo_de_persona = next((m["value"] for m in metafields if m["key"] == "tipo_de_persona"), "Sin persona")
+        
+        # Corregido: retornar todas las variables necesarias
+        return modelo, precio, describe_lo_que_quieres, tengo_un_plano, tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona
+    else:
+        print("❌ Error obteniendo metacampos de Shopify:", response.text)
+        return "Error", "Error", "Error", "Error", "Error", "Error", "Error"
+
+# 📌 Función para obtener la URL del archivo de Shopify usando la referencia
+def get_image_url_from_file_reference(file_reference):
+    shopify_url = f"https://{SHOPIFY_STORE}/admin/api/2023-10/graphql.json"
+    graphql_query = """
+    {
+        node(id: "%s") {
+            ... on MediaImage {
+                image {
+                    src
+                }
+            }
+        }
+    }
+    """ % file_reference
 
     headers = {
         "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
         "Content-Type": "application/json"
     }
 
-    # Consulta a Shopify para obtener detalles del archivo
-    response = requests.get(shopify_url, headers=headers)
-    
+    response = requests.post(shopify_url, headers=headers, json={"query": graphql_query})
+
     if response.status_code == 200:
-        files = response.json().get("files", [])
-        # Buscar el archivo por su file_reference
-        file = next((f for f in files if f['id'] == file_reference), None)
-        if file:
-            return file["url"]  # URL pública del archivo
-        else:
-            print(f"❌ No se encontró el archivo con el ID {file_reference}")
-            return None
+        data = response.json()
+        try:
+            image_url = data["data"]["node"]["image"]["src"]
+            return image_url
+        except KeyError:
+            print("❌ Error: No se pudo obtener la URL de la imagen.")
+            return "Sin URL"
     else:
-        print(f"❌ Error al obtener archivo de Shopify: {response.text}")
-        return None
+        print(f"❌ Error en la solicitud de imagen: {response.status_code} - {response.text}")
+        return "Error"
 
 # 📩 Ruta del webhook que Shopify enviará a esta API
 @app.route('/webhook/shopify', methods=['POST'])
@@ -73,17 +108,11 @@ def receive_webhook():
         # 🔍 Obtener los metacampos desde Shopify
         modelo, precio, describe_lo_que_quieres, tengo_un_plano, tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona = get_customer_metafields(customer_id)
 
+        # Obtener la URL de la imagen de "tengo_un_plano"
+        plano_url = get_image_url_from_file_reference(tengo_un_plano)
+
         # Verificar que los metacampos no estén vacíos
-        print("Valores de metacampos:", modelo, precio, describe_lo_que_quieres, tengo_un_plano, tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona)
-
-        # 📌 Obtener la URL de la imagen del plano desde Shopify
-        plano_url = get_file_url(tengo_un_plano)
-
-        if plano_url:
-            print(f"🔍 URL del plano: {plano_url}")
-        else:
-            print("❌ No se pudo obtener la URL del plano.")
-            plano_url = "Sin URL"
+        print("Valores de metacampos:", modelo, precio, describe_lo_que_quieres, plano_url, tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona)
 
         # 📌 Crear el contacto con los metacampos incluidos
         contact_data = {
@@ -98,7 +127,7 @@ def receive_webhook():
                 "MODELO_CABANA": modelo,
                 "PRECIO_CABANA": precio,
                 "DESCRIPCION_CLIENTE": describe_lo_que_quieres,
-                "PLANO_CLIENTE": plano_url,  # URL del plano
+                "PLANO_CLIENTE": plano_url,  # Aquí se utiliza la URL de la imagen
                 "DIRECCION_CLIENTE": tu_direccin_actual,
                 "PRESUPUESTO_CLIENTE": indica_tu_presupuesto,
                 "TIPO_DE_PERSONA": tipo_de_persona
