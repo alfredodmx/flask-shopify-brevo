@@ -23,7 +23,7 @@ def get_image_url_from_gid(image_gid):
     Dado un 'gid' (como 'gid://shopify/MediaImage/27200526417954'),
     esta función consulta Shopify para obtener la URL pública del archivo.
     """
-    # Extraemos el ID del archivo de Shopify del 'gid'
+    # Extraemos el ID del archivo de Shopify del 'gid' (esto elimina la parte "gid://shopify/MediaImage/")
     media_id = image_gid.split("/")[-1]
     
     # Hacemos una consulta a la API de Shopify para obtener los detalles del archivo
