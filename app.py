@@ -76,6 +76,21 @@ def get_image_url_from_file_reference(file_reference):
         print(f"❌ Error al obtener la URL del archivo: {response.text}")
         return None
 
+# Función para verificar si el contacto ya existe en Brevo
+def check_if_contact_exists(email):
+    brevo_url = "https://api.sendinblue.com/v3/contacts"
+    headers = {
+        "api-key": BREVO_API_KEY,
+        "Content-Type": "application/json"
+    }
+    
+    response = requests.get(f"{brevo_url}/{email}", headers=headers)
+    
+    if response.status_code == 200:
+        return True  # Contacto ya existe
+    else:
+        return False  # Contacto no existe
+
 # Ruta del webhook que Shopify enviará a esta API
 @app.route('/webhook/shopify', methods=['POST'])
 def receive_webhook():
@@ -102,6 +117,12 @@ def receive_webhook():
         if not email or not customer_id:
             print("❌ ERROR: No se recibió un email o ID de cliente válido.")
             return jsonify({"error": "Falta email o ID de cliente"}), 400
+
+        # Verificar si el contacto ya existe en Brevo
+        if check_if_contact_exists(email):
+            print("✅ El contacto ya existe en Brevo.")
+        else:
+            print("❌ El contacto no existe en Brevo, creando uno nuevo.")
 
         # Obtener los metacampos desde Shopify
         image_url = get_customer_metafields(customer_id)
