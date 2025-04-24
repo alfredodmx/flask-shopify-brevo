@@ -26,6 +26,11 @@ def get_image_url_from_gid(image_gid):
     # Extraemos el ID del archivo de Shopify del 'gid' (esto elimina la parte "gid://shopify/MediaImage/")
     media_id = image_gid.split("/")[-1]
     
+    # Verificar si el 'media_id' tiene el formato correcto (debe ser un número)
+    if not media_id.isdigit():
+        print(f"❌ Error: El 'media_id' extraído no es válido: {media_id}")
+        return "Sin URL"
+
     # Hacemos una consulta a la API de Shopify para obtener los detalles del archivo
     shopify_url = f"https://{SHOPIFY_STORE}/admin/api/2023-10/graphql.json"
     
