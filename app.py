@@ -7,7 +7,7 @@ app = Flask(__name__)
 
 # 🔑 Obtener API Key de Brevo y Shopify desde variables de entorno
 BREVO_API_KEY = os.getenv("BREVO_API_KEY")
-SHOPIFY_ACCESS_TOKEN = os.getenv("SHOPIFY_ACCESS_TOKEN")  # Agregamos la API Key de Shopify
+SHOPIFY_ACCESS_TOKEN = os.getenv("SHOPIFY_ACCESS_TOKEN")
 SHOPIFY_STORE = "uaua8v-s7.myshopify.com"  # Reemplaza con tu dominio real de Shopify
 
 if not BREVO_API_KEY or not SHOPIFY_ACCESS_TOKEN:
@@ -46,6 +46,11 @@ def get_customer_metafields(customer_id):
 
 # 📌 Función para obtener la URL pública de una imagen desde el file_reference
 def get_image_url_from_file_reference(file_reference):
+    # Verifica que el GID sea correcto
+    if not file_reference.startswith("gid://shopify/MediaImage/"):
+        print("❌ El file_reference no es válido.")
+        return None
+
     file_id = file_reference.split("/")[-1]  # Obtener solo el ID del archivo del GID
     shopify_url = f"https://{SHOPIFY_STORE}/admin/api/2023-10/files/{file_id}.json"
     
@@ -58,7 +63,11 @@ def get_image_url_from_file_reference(file_reference):
     
     if response.status_code == 200:
         file_data = response.json().get("file", {})
-        return file_data.get("url")  # URL pública del archivo
+        if file_data.get("url"):
+            return file_data.get("url")  # URL pública del archivo
+        else:
+            print("❌ No se encontró la URL pública del archivo.")
+            return None
     else:
         print("❌ Error obteniendo la URL del archivo:", response.text)
         return None
