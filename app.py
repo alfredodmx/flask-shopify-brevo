@@ -1,13 +1,13 @@
-from flask import Flask, request, jsonify
+ from flask import Flask, request, jsonify
 import requests
 import json
 import os
 
 app = Flask(__name__)
 
-# Obtener API Keys desde las variables de entorno
+# 🔑 Obtener API Key de Brevo y Shopify desde variables de entorno
 BREVO_API_KEY = os.getenv("BREVO_API_KEY")
-SHOPIFY_ACCESS_TOKEN = os.getenv("SHOPIFY_ACCESS_TOKEN")
+SHOPIFY_ACCESS_TOKEN = os.getenv("SHOPIFY_ACCESS_TOKEN")  # Agregamos la API Key de Shopify
 SHOPIFY_STORE = "uaua8v-s7.myshopify.com"  # Reemplaza con tu dominio real de Shopify
 
 if not BREVO_API_KEY or not SHOPIFY_ACCESS_TOKEN:
@@ -17,7 +17,7 @@ if not BREVO_API_KEY or not SHOPIFY_ACCESS_TOKEN:
 # Endpoint de la API de Brevo para agregar un nuevo contacto
 BREVO_API_URL = "https://api.sendinblue.com/v3/contacts"
 
-# Función para obtener los metacampos de un cliente en Shopify
+# 📌 Función para obtener los metacampos de un cliente en Shopify
 def get_customer_metafields(customer_id):
     shopify_url = f"https://{SHOPIFY_STORE}/admin/api/2023-10/customers/{customer_id}/metafields.json"
     
@@ -30,68 +30,21 @@ def get_customer_metafields(customer_id):
     
     if response.status_code == 200:
         metafields = response.json().get("metafields", [])
-        # Buscar el metafield de tipo file_reference para obtener la imagen
-        file_reference = next((m["value"] for m in metafields if m["key"] == "tengo_un_plano"), None)
+        modelo = next((m["value"] for m in metafields if m["key"] == "modelo"), "Sin modelo")
+        precio = next((m["value"] for m in metafields if m["key"] == "precio"), "Sin precio")
+        describe_lo_que_quieres = next((m["value"] for m in metafields if m["key"] == "describe_lo_que_quieres"), "Sin descripción")
+        tengo_un_plano = next((m["value"] for m in metafields if m["key"] == "tengo_un_plano"), "Sin plano")
+        tu_direccin_actual = next((m["value"] for m in metafields if m["key"] == "tu_direccin_actual"), "Sin dirección")
+        indica_tu_presupuesto = next((m["value"] for m in metafields if m["key"] == "indica_tu_presupuesto"), "Sin presupuesto")
+        tipo_de_persona = next((m["value"] for m in metafields if m["key"] == "tipo_de_persona"), "Sin persona")
         
-        if file_reference:
-            # Llamar a la API de Shopify para obtener la URL pública de la imagen
-            image_url = get_image_url_from_file_reference(file_reference)
-            if image_url:
-                return image_url
-            else:
-                print("❌ No se pudo obtener la URL de la imagen del archivo.")
-                return "Sin URL"
-        else:
-            print("❌ No se encontró el file_reference en los metacampos")
-            return "Sin URL"
+        # Corregido: retornar todas las variables necesarias
+        return modelo, precio, describe_lo_que_quieres, tengo_un_plano, tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona
     else:
         print("❌ Error obteniendo metacampos de Shopify:", response.text)
-        return "Sin URL"
+        return "Error", "Error", "Error", "Error", "Error", "Error", "Error"
 
-# Función para obtener la URL pública de la imagen desde el file_reference
-def get_image_url_from_file_reference(file_reference):
-    # Verificar que el GID sea válido
-    if not file_reference.startswith("gid://shopify/MediaImage/"):
-        print("❌ El file_reference no tiene el formato esperado.")
-        return None
-
-    file_id = file_reference.split("/")[-1]  # Obtener solo el ID del archivo del GID
-    shopify_url = f"https://{SHOPIFY_STORE}/admin/api/2023-10/files/{file_id}.json"
-    
-    headers = {
-        "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
-        "Content-Type": "application/json"
-    }
-    
-    response = requests.get(shopify_url, headers=headers)
-    
-    if response.status_code == 200:
-        file_data = response.json().get("file", {})
-        if file_data.get("url"):
-            return file_data.get("url")  # URL pública del archivo
-        else:
-            print("❌ No se encontró la URL pública del archivo.")
-            return None
-    else:
-        print(f"❌ Error al obtener la URL del archivo: {response.text}")
-        return None
-
-# Función para verificar si el contacto ya existe en Brevo
-def check_if_contact_exists(email):
-    brevo_url = "https://api.sendinblue.com/v3/contacts"
-    headers = {
-        "api-key": BREVO_API_KEY,
-        "Content-Type": "application/json"
-    }
-    
-    response = requests.get(f"{brevo_url}/{email}", headers=headers)
-    
-    if response.status_code == 200:
-        return True  # Contacto ya existe
-    else:
-        return False  # Contacto no existe
-
-# Ruta del webhook que Shopify enviará a esta API
+# 📩 Ruta del webhook que Shopify enviará a esta API
 @app.route('/webhook/shopify', methods=['POST'])
 def receive_webhook():
     try:
@@ -118,22 +71,13 @@ def receive_webhook():
             print("❌ ERROR: No se recibió un email o ID de cliente válido.")
             return jsonify({"error": "Falta email o ID de cliente"}), 400
 
-        # Verificar si el contacto ya existe en Brevo
-        if check_if_contact_exists(email):
-            print("✅ El contacto ya existe en Brevo.")
-        else:
-            print("❌ El contacto no existe en Brevo, creando uno nuevo.")
+        # 🔍 Obtener los metacampos desde Shopify
+        modelo, precio, describe_lo_que_quieres, tengo_un_plano, tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona = get_customer_metafields(customer_id)
 
-        # Obtener los metacampos desde Shopify
-        image_url = get_customer_metafields(customer_id)
+        # Verificar que los metacampos no estén vacíos
+        print("Valores de metacampos:", modelo, precio, describe_lo_que_quieres, tengo_un_plano, tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona)
 
-        if image_url:
-            print(f"🔍 URL de la imagen: {image_url}")
-        else:
-            print("❌ ERROR: No se pudo obtener la URL de la imagen.")
-            image_url = "Sin URL"
-
-        # Crear el contacto con los metacampos incluidos
+        # 📌 Crear el contacto con los metacampos incluidos
         contact_data = {
             "email": email,
             "attributes": {
@@ -143,7 +87,13 @@ def receive_webhook():
                 "WHATSAPP": phone,
                 "SMS": phone,
                 "LANDLINE_NUMBER": phone,
-                "PLANO_CLIENTE": image_url,  # URL del archivo
+                "MODELO_CABANA": modelo,
+                "PRECIO_CABANA": precio,
+                "DESCRIPCION_CLIENTE": describe_lo_que_quieres,
+                "PLANO_CLIENTE": tengo_un_plano,  # Si 'plano' es un archivo, asegúrate de enviar la URL del archivo
+                "DIRECCION_CLIENTE": tu_direccin_actual,
+                "PRESUPUESTO_CLIENTE": indica_tu_presupuesto,
+                "TIPO_DE_PERSONA": tipo_de_persona
             }
         }
 
@@ -152,10 +102,13 @@ def receive_webhook():
             "Content-Type": "application/json"
         }
 
-        # Enviar los datos a Brevo
+        # 🚀 Imprimir qué datos se están enviando a Brevo
+        print("📤 Enviando datos a Brevo:", json.dumps(contact_data, indent=4))
+
+        # 🚀 Enviar los datos a Brevo
         response = requests.post(BREVO_API_URL, json=contact_data, headers=headers)
 
-        # Imprimir la respuesta de Brevo
+        # 🔍 Imprimir la respuesta de Brevo
         print("🔍 Respuesta de Brevo:", response.status_code, response.text)
 
         if response.status_code == 200:
@@ -167,7 +120,7 @@ def receive_webhook():
         print("❌ ERROR procesando el webhook:", str(e))
         return jsonify({"error": "Error interno"}), 500
 
-# Iniciar el servidor en Render
+# 🔥 Iniciar el servidor en Render
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
