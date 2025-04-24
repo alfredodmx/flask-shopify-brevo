@@ -5,7 +5,7 @@ import os
 
 app = Flask(__name__)
 
-# 🔑 Obtener API Key de Brevo y Shopify desde variables de entorno
+# Obtener API Key de Brevo y Shopify desde variables de entorno
 BREVO_API_KEY = os.getenv("BREVO_API_KEY")
 SHOPIFY_ACCESS_TOKEN = os.getenv("SHOPIFY_ACCESS_TOKEN")
 SHOPIFY_STORE = "uaua8v-s7.myshopify.com"  # Reemplaza con tu dominio real de Shopify
@@ -17,56 +17,26 @@ if not BREVO_API_KEY or not SHOPIFY_ACCESS_TOKEN:
 # Endpoint de la API de Brevo para agregar un nuevo contacto
 BREVO_API_URL = "https://api.sendinblue.com/v3/contacts"
 
-# 📌 Función para obtener los medios del producto desde Shopify usando GraphQL
-def get_product_media(product_id):
-    shopify_graphql_url = f"https://{SHOPIFY_STORE}/admin/api/2023-10/graphql.json"
-    
-    query = """
-    query getProductMedia($productId: ID!) {
-      product(id: $productId) {
-        id
-        media(first: 10) {
-          edges {
-            node {
-              id
-              mediaContentType
-              preview {
-                image {
-                  src
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-    """
-    
-    variables = {
-        "productId": product_id
-    }
-
+# Función para obtener la URL pública de la imagen en los archivos de Shopify
+def get_image_url(file_reference):
+    # Accedemos a la API de Shopify para obtener el archivo
+    shopify_url = f"https://{SHOPIFY_STORE}/admin/api/2023-10/files.json"
     headers = {
         "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
         "Content-Type": "application/json"
     }
-
-    response = requests.post(shopify_graphql_url, json={"query": query, "variables": variables}, headers=headers)
-
+    
+    response = requests.get(shopify_url, headers=headers)
     if response.status_code == 200:
-        data = response.json()
-        if data.get('data') and data['data'].get('product'):
-            media = data['data']['product']['media']['edges']
-            # Extraer las URLs de las imágenes
-            image_urls = [node['node']['preview']['image']['src'] for node in media if node['node']['mediaContentType'] == 'IMAGE']
-            return image_urls
-        else:
-            return []
-    else:
-        print("❌ Error al obtener medios del producto:", response.text)
-        return []
+        files = response.json().get("files", [])
+        
+        # Buscar la imagen en los archivos con el ID de referencia
+        for file in files:
+            if file["id"] == file_reference:
+                return file["public_url"]  # Devolvemos la URL pública del archivo
+    return None  # Si no se encuentra la imagen, retornamos None
 
-# 📩 Ruta del webhook que Shopify enviará a esta API
+# Ruta del webhook que Shopify enviará a esta API
 @app.route('/webhook/shopify', methods=['POST'])
 def receive_webhook():
     try:
@@ -83,26 +53,31 @@ def receive_webhook():
         print("📩 Webhook recibido de Shopify (JSON):", json.dumps(data, indent=4))
 
         # Extraer información básica
-        customer_id = data.get("id")
+        customer_id = data.get("id")  # Obtener el ID del cliente
         email = data.get("email")
         first_name = data.get("first_name", "")
         last_name = data.get("last_name", "")
         phone = data.get("phone", "")
-        product_id = data.get("product_id")  # Asegúrate de que el producto esté incluido en el webhook
+        file_reference = data.get("metafields", {}).get("tengo_un_plano", None)  # Extraemos el file_reference
 
-        if not email or not customer_id or not product_id:
-            print("❌ ERROR: No se recibió un email, ID de cliente o ID de producto válido.")
-            return jsonify({"error": "Falta información necesaria"}), 400
+        if not email or not customer_id:
+            print("❌ ERROR: No se recibió un email o ID de cliente válido.")
+            return jsonify({"error": "Falta email o ID de cliente"}), 400
 
-        # 🔍 Obtener los medios del producto desde Shopify
-        image_urls = get_product_media(product_id)
+        if not file_reference:
+            print("❌ ERROR: No se encontró el file_reference en los metacampos.")
+            return jsonify({"error": "Falta file_reference"}), 400
 
-        # Verificar si encontramos imágenes
-        if not image_urls:
-            print("❌ ERROR: No se encontraron imágenes para el producto.")
-            return jsonify({"error": "No se encontraron imágenes para el producto"}), 400
+        # Obtener la URL de la imagen usando el file_reference
+        image_url = get_image_url(file_reference)
+        
+        if not image_url:
+            print("❌ ERROR: No se pudo obtener la URL del archivo.")
+            return jsonify({"error": "No se pudo obtener la URL del archivo"}), 400
 
-        # 📌 Crear el contacto con los metacampos incluidos
+        print(f"🔍 URL de la imagen obtenida: {image_url}")
+
+        # Aquí puedes continuar con la lógica para enviar la URL a Brevo
         contact_data = {
             "email": email,
             "attributes": {
@@ -112,7 +87,7 @@ def receive_webhook():
                 "WHATSAPP": phone,
                 "SMS": phone,
                 "LANDLINE_NUMBER": phone,
-                "PLANO_CLIENTE": image_urls[0],  # Usamos la primera imagen como el plano
+                "PLANO_CLIENTE": image_url  # Usamos la URL de la imagen
             }
         }
 
