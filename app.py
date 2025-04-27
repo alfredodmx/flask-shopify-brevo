@@ -34,7 +34,9 @@ def get_public_image_url(gid):
             query {
               node(id: "%s") {
                 ... on MediaImage {
-                  url
+                  image {
+                    url
+                  }
                 }
               }
             }
@@ -45,8 +47,8 @@ def get_public_image_url(gid):
         response = requests.post(SHOPIFY_GRAPHQL_URL, headers=headers, json=query, verify=False)
         response.raise_for_status()  # Lanza una excepción para errores HTTP
         data = response.json()
-        if data and data.get("data") and data["data"].get("node") and data["data"]["node"].get("url"):
-            return data["data"]["node"]["url"]
+        if data and data.get("data") and data["data"].get("node") and data["data"]["node"].get("image") and data["data"]["node"]["image"].get("url"):
+            return data["data"]["node"]["image"]["url"]
         else:
             print(f"⚠️ No se pudo obtener la URL pública para el GID: {gid}. Respuesta de Shopify: {data}")
             return None
