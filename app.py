@@ -39,7 +39,8 @@ def get_public_image_url(gid):
         """ % gid
     }
     try:
-        response = requests.post(SHOPIFY_GRAPHQL_URL, headers=headers, json=query)
+        # Deshabilitar la verificación SSL agregando verify=False
+        response = requests.post(SHOPIFY_GRAPHQL_URL, headers=headers, json=query, verify=False)
         response.raise_for_status()  # Lanza una excepción para errores HTTP
         data = response.json()
         if data and data.get("data") and data["data"].get("mediaImage") and data["data"]["mediaImage"].get("url"):
@@ -60,9 +61,10 @@ def get_customer_metafields(customer_id):
         "Content-Type": "application/json"
     }
 
-    response = requests.get(shopify_url, headers=headers)
-
-    if response.status_code == 200:
+    try:
+        # Deshabilitar la verificación SSL agregando verify=False
+        response = requests.get(shopify_url, headers=headers, verify=False)
+        response.raise_for_status()
         metafields = response.json().get("metafields", [])
         modelo = next((m["value"] for m in metafields if m["key"] == "modelo"), "Sin modelo")
         precio = next((m["value"] for m in metafields if m["key"] == "precio"), "Sin precio")
@@ -76,8 +78,8 @@ def get_customer_metafields(customer_id):
         tengo_un_plano_url = get_public_image_url(tengo_un_plano_gid) if tengo_un_plano_gid else "Sin plano"
 
         return modelo, precio, describe_lo_que_quieres, tengo_un_plano_url, tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona
-    else:
-        print("❌ Error obteniendo metacampos de Shopify:", response.text)
+    except requests.exceptions.RequestException as e:
+        print("❌ Error obteniendo metacampos de Shopify:", e)
         return "Error", "Error", "Error", "Error", "Error", "Error", "Error"
 
 # 📩 Ruta del webhook que Shopify enviará a esta API
