@@ -18,29 +18,64 @@ if not BREVO_API_KEY or not SHOPIFY_ACCESS_TOKEN:
 BREVO_API_URL = "https://api.sendinblue.com/v3/contacts"
 BREVO_GET_CONTACT_API_URL = "https://api.sendinblue.com/v3/contacts/{email}"
 
+# Endpoint de la API GraphQL de Shopify
+SHOPIFY_GRAPHQL_URL = f"https://{SHOPIFY_STORE}/admin/api/2023-10/graphql.json"
+
+# 📌 Función para obtener la URL pública de un MediaImage usando su GID
+def get_public_image_url(gid):
+    if not gid:
+        return None
+    headers = {
+        "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+        "Content-Type": "application/json"
+    }
+    query = {
+        "query": """
+            query {
+              mediaImage(id: "%s") {
+                url
+              }
+            }
+        """ % gid
+    }
+    try:
+        response = requests.post(SHOPIFY_GRAPHQL_URL, headers=headers, json=query)
+        response.raise_for_status()  # Lanza una excepción para errores HTTP
+        data = response.json()
+        if data and data.get("data") and data["data"].get("mediaImage") and data["data"]["mediaImage"].get("url"):
+            return data["data"]["mediaImage"]["url"]
+        else:
+            print(f"⚠️ No se pudo obtener la URL pública para el GID: {gid}. Respuesta de Shopify: {data}")
+            return None
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Error al consultar la API GraphQL de Shopify para el GID {gid}: {e}")
+        return None
+
 # 📌 Función para obtener los metacampos de un cliente en Shopify
 def get_customer_metafields(customer_id):
     shopify_url = f"https://{SHOPIFY_STORE}/admin/api/2023-10/customers/{customer_id}/metafields.json"
-    
+
     headers = {
         "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
         "Content-Type": "application/json"
     }
 
     response = requests.get(shopify_url, headers=headers)
-    
+
     if response.status_code == 200:
         metafields = response.json().get("metafields", [])
         modelo = next((m["value"] for m in metafields if m["key"] == "modelo"), "Sin modelo")
         precio = next((m["value"] for m in metafields if m["key"] == "precio"), "Sin precio")
         describe_lo_que_quieres = next((m["value"] for m in metafields if m["key"] == "describe_lo_que_quieres"), "Sin descripción")
-        tengo_un_plano = next((m["value"] for m in metafields if m["key"] == "tengo_un_plano"), "Sin plano")
+        tengo_un_plano_gid = next((m["value"] for m in metafields if m["key"] == "tengo_un_plano"), None)
         tu_direccin_actual = next((m["value"] for m in metafields if m["key"] == "tu_direccin_actual"), "Sin dirección")
         indica_tu_presupuesto = next((m["value"] for m in metafields if m["key"] == "indica_tu_presupuesto"), "Sin presupuesto")
         tipo_de_persona = next((m["value"] for m in metafields if m["key"] == "tipo_de_persona"), "Sin persona")
-        
-        # Corregido: retornar todas las variables necesarias
-        return modelo, precio, describe_lo_que_quieres, tengo_un_plano, tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona
+
+        # Obtener la URL pública del plano si el GID existe
+        tengo_un_plano_url = get_public_image_url(tengo_un_plano_gid) if tengo_un_plano_gid else "Sin plano"
+
+        return modelo, precio, describe_lo_que_quieres, tengo_un_plano_url, tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona
     else:
         print("❌ Error obteniendo metacampos de Shopify:", response.text)
         return "Error", "Error", "Error", "Error", "Error", "Error", "Error"
@@ -101,7 +136,7 @@ def receive_webhook():
                     "MODELO_CABANA": modelo,
                     "PRECIO_CABANA": precio,
                     "DESCRIPCION_CLIENTE": describe_lo_que_quieres,
-                    "PLANO_CLIENTE": tengo_un_plano,  # Si 'plano' es un archivo, asegúrate de enviar la URL del archivo
+                    "PLANO_CLIENTE": tengo_un_plano,  # Ahora debería ser la URL pública
                     "DIRECCION_CLIENTE": tu_direccin_actual,
                     "PRESUPUESTO_CLIENTE": indica_tu_presupuesto,
                     "TIPO_DE_PERSONA": tipo_de_persona
@@ -130,7 +165,7 @@ def receive_webhook():
                     "MODELO_CABANA": modelo,
                     "PRECIO_CABANA": precio,
                     "DESCRIPCION_CLIENTE": describe_lo_que_quieres,
-                    "PLANO_CLIENTE": tengo_un_plano,  # Si 'plano' es un archivo, asegúrate de enviar la URL del archivo
+                    "PLANO_CLIENTE": tengo_un_plano,  # Ahora debería ser la URL pública
                     "DIRECCION_CLIENTE": tu_direccin_actual,
                     "PRESUPUESTO_CLIENTE": indica_tu_presupuesto,
                     "TIPO_DE_PERSONA": tipo_de_persona
@@ -140,8 +175,8 @@ def receive_webhook():
             # 🚀 Enviar los datos a Brevo para crear el nuevo contacto
             create_response = requests.post(BREVO_API_URL, json=contact_data, headers=headers)
 
-            if create_response.status_code == 200:
-                return jsonify({"message": "Contacto creado en Brevo con metacampos"}), 200
+            if create_response.status_code == 201:  # El código de creación exitosa suele ser 201
+                return jsonify({"message": "Contacto creado en Brevo con metacampos"}), 201
             else:
                 return jsonify({"error": "No se pudo crear el contacto en Brevo", "details": create_response.text}), 400
         else:
