@@ -1,10 +1,11 @@
 from flask import Flask, request, jsonify
 import requests
 import json
-import os  # <-- importa os antes de usar getenv
+import os
 import smtplib
 from email.mime.text import MIMEText
 from email.utils import formataddr
+from urllib.parse import quote   # <-- para codificar el email en la URL
 
 app = Flask(__name__)
 
@@ -105,7 +106,9 @@ def get_public_file_url(gid):
         """
     }
     try:
-        response_image = requests.post(SHOPIFY_GRAPHQL_URL, headers=headers, json=query_image, verify=False)
+        response_image = requests.post(
+            SHOPIFY_GRAPHQL_URL, headers=headers, json=query_image, timeout=15
+        )
         response_image.raise_for_status()
         data_image = response_image.json()
         if (data_image and data_image.get("data") and data_image["data"].get("node")
@@ -126,7 +129,9 @@ def get_public_file_url(gid):
         """
     }
     try:
-        response_file = requests.post(SHOPIFY_GRAPHQL_URL, headers=headers, json=query_file, verify=False)
+        response_file = requests.post(
+            SHOPIFY_GRAPHQL_URL, headers=headers, json=query_file, timeout=15
+        )
         response_file.raise_for_status()
         data_file = response_file.json()
         if data_file and data_file.get("data") and data_file["data"].get("node") and data_file["data"]["node"].get("url"):
@@ -148,7 +153,7 @@ def get_customer_metafields(customer_id):
         "Content-Type": "application/json"
     }
     try:
-        response = requests.get(shopify_url, headers=headers, verify=False)
+        response = requests.get(shopify_url, headers=headers, timeout=15)
         response.raise_for_status()
         metafields = response.json().get("metafields", [])
         modelo = next((m["value"] for m in metafields if m["key"] == "modelo"), "Sin modelo")
@@ -221,26 +226,35 @@ def receive_webhook():
 
         headers = {"api-key": BREVO_API_KEY, "Content-Type": "application/json"}
 
+        # Codificar email para la URL
+        email_id = quote(email, safe="")
+
         # ¿Existe contacto en Brevo?
-        response = requests.get(BREVO_GET_CONTACT_API_URL.format(email=email), headers=headers)
+        response = requests.get(
+            BREVO_GET_CONTACT_API_URL.format(email=email_id),
+            headers=headers,
+            timeout=15
+        )
 
         if response.status_code == 200:
             print(f"⚠️ {email} ya existe en Brevo. Se actualizará.")
             update_payload = {"attributes": attributes}
             if BREVO_LIST_ID > 0:
                 update_payload["listIds"] = [BREVO_LIST_ID]
-                update_payload["unlinkListIds"] = []
+                update_payload["unlinkListIds"] = []  # no quitar de otras
 
             update_response = requests.put(
-                BREVO_GET_CONTACT_API_URL.format(email=email),
+                BREVO_GET_CONTACT_API_URL.format(email=email_id),
                 json=update_payload,
-                headers=headers
+                headers=headers,
+                timeout=15
             )
             if update_response.status_code == 200:
                 # 🔔 (Opcional) avisar también en actualización:
                 # send_internal_alert(created=False, email=email, attrs=attributes)
                 return jsonify({"message": "Contacto actualizado en Brevo"}), 200
             else:
+                print("❌ Brevo update ERROR:", update_response.status_code, update_response.text[:500])
                 return jsonify({"error": "No se pudo actualizar el contacto en Brevo",
                                 "details": update_response.text}), 400
 
@@ -250,16 +264,24 @@ def receive_webhook():
             if BREVO_LIST_ID > 0:
                 contact_data["listIds"] = [BREVO_LIST_ID]
 
-            create_response = requests.post(BREVO_API_URL, json=contact_data, headers=headers)
+            create_response = requests.post(
+                BREVO_API_URL,
+                json=contact_data,
+                headers=headers,
+                timeout=15
+            )
 
             if create_response.status_code == 201:
                 # 🔔 AVISO por Zoho al crear
                 send_internal_alert(created=True, email=email, attrs=attributes)
                 return jsonify({"message": "Contacto creado en Brevo con metacampos"}), 201
             else:
+                print("❌ Brevo create ERROR:", create_response.status_code, create_response.text[:500])
                 return jsonify({"error": "No se pudo crear el contacto en Brevo",
                                 "details": create_response.text}), 400
+
         else:
+            print("❌ Brevo exists-check ERROR:", response.status_code, response.text[:500])
             return jsonify({"error": "Error al verificar si el contacto existe",
                             "details": response.text}), 400
 
