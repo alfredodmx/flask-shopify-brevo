@@ -1,3 +1,4 @@
+# app.py
 from flask import Flask, request, jsonify
 import requests
 import json
@@ -5,24 +6,28 @@ import os
 import smtplib
 from email.mime.text import MIMEText
 from email.utils import formataddr
-from urllib.parse import quote   # <-- para codificar el email en la URL
 
 app = Flask(__name__)
 
 # =========================
 #  SMTP (Zoho) - Alertas
 # =========================
-ALERT_SMTP_HOST = os.getenv("ALERT_SMTP_HOST")          # ej. smtp.zoho.com
+ALERT_SMTP_HOST = os.getenv("ALERT_SMTP_HOST")          # smtp.zoho.com (587) o smtppro.zoho.com (465)
 ALERT_SMTP_PORT = int(os.getenv("ALERT_SMTP_PORT", "587"))
-ALERT_SMTP_USER = os.getenv("ALERT_SMTP_USER")          # ej. alertas@tu-dominio.com
-ALERT_SMTP_PASS = os.getenv("ALERT_SMTP_PASS")          # pass SMTP / App Password
-ALERT_FROM      = os.getenv("ALERT_FROM")               # mismo buzón de Zoho
-ALERT_TO        = os.getenv("ALERT_TO", "")             # "ventas@...,soporte@...,gerencia@..."
+ALERT_SMTP_USER = os.getenv("ALERT_SMTP_USER")          # p.ej.: root@espaciocontainerhouse.cl
+ALERT_SMTP_PASS = os.getenv("ALERT_SMTP_PASS")          # App Password de Zoho (no el nombre)
+ALERT_FROM      = os.getenv("ALERT_FROM")               # mismo buzón que el USER o alias permitido
+ALERT_TO        = os.getenv("ALERT_TO", "")             # "dest1@...,dest2@..."
 
 def send_internal_alert(created: bool, email: str, attrs: dict):
-    """Envía un correo interno vía SMTP (Zoho)."""
+    """
+    Envía un correo interno vía SMTP (Zoho).
+    Si el puerto es 465 se usa SSL directo (SMTP_SSL).
+    Si el puerto es 587 se usa STARTTLS.
+    """
     if not (ALERT_SMTP_HOST and ALERT_SMTP_USER and ALERT_SMTP_PASS and ALERT_FROM and ALERT_TO):
-        print("⚠️ SMTP de alertas no configurado; omito envío.")
+        print("⚠️ SMTP de alertas no configurado; omito envío.",
+              ALERT_SMTP_HOST, ALERT_SMTP_USER, ALERT_FROM, ALERT_TO)
         return
 
     subject = ("🆕 Nuevo lead" if created else "ℹ️ Lead actualizado") + f": {email}"
@@ -41,7 +46,7 @@ def send_internal_alert(created: bool, email: str, attrs: dict):
     <p><b>Presupuesto:</b> {attrs.get('PRESUPUESTO_CLIENTE','')}</p>
     <p><b>Tipo de persona:</b> {attrs.get('TIPO_DE_PERSONA','')}</p>
     <hr/>
-    <p>Fuente: Shopify → Render → Brevo (Lista #7)</p>
+    <p>Fuente: Shopify → Render → Brevo (Lista #{os.getenv("BREVO_LIST_ID","?")})</p>
     """
 
     msg = MIMEText(html, "html", "utf-8")
@@ -50,14 +55,23 @@ def send_internal_alert(created: bool, email: str, attrs: dict):
     to_list = [t.strip() for t in ALERT_TO.split(",") if t.strip()]
     msg["To"] = ", ".join(to_list)
 
+    print(f"➡️ Intentando enviar alerta SMTP via {ALERT_SMTP_HOST}:{ALERT_SMTP_PORT} "
+          f"como {ALERT_SMTP_USER} FROM {ALERT_FROM} TO {to_list}")
+
     try:
-        with smtplib.SMTP(ALERT_SMTP_HOST, ALERT_SMTP_PORT) as server:
-            server.starttls()
-            server.login(ALERT_SMTP_USER, ALERT_SMTP_PASS)
-            server.sendmail(ALERT_FROM, to_list, msg.as_string())
+        if int(ALERT_SMTP_PORT) == 465:
+            with smtplib.SMTP_SSL(ALERT_SMTP_HOST, int(ALERT_SMTP_PORT), timeout=20) as server:
+                server.login(ALERT_SMTP_USER, ALERT_SMTP_PASS)
+                server.sendmail(ALERT_FROM, to_list, msg.as_string())
+        else:
+            with smtplib.SMTP(ALERT_SMTP_HOST, int(ALERT_SMTP_PORT), timeout=20) as server:
+                server.starttls()
+                server.login(ALERT_SMTP_USER, ALERT_SMTP_PASS)
+                server.sendmail(ALERT_FROM, to_list, msg.as_string())
+
         print(f"📧 Alerta enviada a: {to_list}")
     except Exception as e:
-        print("❌ Error enviando alerta SMTP:", str(e))
+        print("❌ Error enviando alerta SMTP:", repr(e))
 
 
 # =========================
@@ -72,7 +86,7 @@ BREVO_LIST_ID = int(os.getenv("BREVO_LIST_ID", "0"))
 
 if not BREVO_API_KEY or not SHOPIFY_ACCESS_TOKEN:
     print("❌ ERROR: Falta BREVO_API_KEY o SHOPIFY_ACCESS_TOKEN.")
-    exit(1)
+    raise SystemExit(1)
 
 # Endpoints Brevo
 BREVO_API_URL = "https://api.sendinblue.com/v3/contacts"
@@ -86,6 +100,7 @@ SHOPIFY_GRAPHQL_URL = f"https://{SHOPIFY_STORE}/admin/api/2023-10/graphql.json"
 #  Helpers Shopify
 # =========================
 def get_public_file_url(gid):
+    """Devuelve URL pública desde un GID de Shopify (MediaImage o GenericFile)."""
     if not gid:
         return None
     headers = {
@@ -107,7 +122,7 @@ def get_public_file_url(gid):
     }
     try:
         response_image = requests.post(
-            SHOPIFY_GRAPHQL_URL, headers=headers, json=query_image, timeout=15
+            SHOPIFY_GRAPHQL_URL, headers=headers, json=query_image, verify=False, timeout=15
         )
         response_image.raise_for_status()
         data_image = response_image.json()
@@ -130,7 +145,7 @@ def get_public_file_url(gid):
     }
     try:
         response_file = requests.post(
-            SHOPIFY_GRAPHQL_URL, headers=headers, json=query_file, timeout=15
+            SHOPIFY_GRAPHQL_URL, headers=headers, json=query_file, verify=False, timeout=15
         )
         response_file.raise_for_status()
         data_file = response_file.json()
@@ -143,17 +158,16 @@ def get_public_file_url(gid):
         print(f"⚠️ GenericFile GID {gid}: {e}")
         return None
 
-    return None
-
 
 def get_customer_metafields(customer_id):
+    """Obtiene metacampos REST del cliente en Shopify."""
     shopify_url = f"https://{SHOPIFY_STORE}/admin/api/2023-10/customers/{customer_id}/metafields.json"
     headers = {
         "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
         "Content-Type": "application/json"
     }
     try:
-        response = requests.get(shopify_url, headers=headers, timeout=15)
+        response = requests.get(shopify_url, headers=headers, verify=False, timeout=15)
         response.raise_for_status()
         metafields = response.json().get("metafields", [])
         modelo = next((m["value"] for m in metafields if m["key"] == "modelo"), "Sin modelo")
@@ -174,8 +188,30 @@ def get_customer_metafields(customer_id):
 
 
 # =========================
-#  Webhook principal
+#  Endpoints
 # =========================
+@app.route("/debug/smtp", methods=["POST"])
+def debug_smtp():
+    """Dispara un correo de prueba SMTP sin tocar Brevo/Shopify."""
+    attrs = {
+        "NOMBRE": "Test",
+        "APELLIDOS": "SMTP",
+        "TELEFONO_WHATSAPP": "",
+        "MODELO_CABANA": "",
+        "PRECIO_CABANA": "",
+        "DESCRIPCION_CLIENTE": "Prueba directa SMTP desde Render",
+        "PLANO_CLIENTE": "",
+        "DIRECCION_CLIENTE": "",
+        "PRESUPUESTO_CLIENTE": "",
+        "TIPO_DE_PERSONA": ""
+    }
+    try:
+        send_internal_alert(created=True, email="smtp-test@espaciocontainerhouse.cl", attrs=attrs)
+        return jsonify({"ok": True, "msg": "SMTP test disparado. Revisa logs y casillas."}), 200
+    except Exception as e:
+        return jsonify({"ok": False, "err": str(e)}), 500
+
+
 @app.route('/webhook/shopify', methods=['POST'])
 def receive_webhook():
     try:
@@ -197,7 +233,7 @@ def receive_webhook():
         phone = data.get("phone", "")
 
         if not email or not customer_id:
-            print("❌ ERROR: No se recibió un email o ID de cliente válido.")
+            print("❌ ERROR: Falta email o ID de cliente")
             return jsonify({"error": "Falta email o ID de cliente"}), 400
 
         # Metacampos Shopify
@@ -225,23 +261,17 @@ def receive_webhook():
         }
 
         headers = {"api-key": BREVO_API_KEY, "Content-Type": "application/json"}
-
-        # Codificar email para la URL
-        email_id = quote(email, safe="")
+        email_id = email  # si quisieras, aquí podrías URL-encodear
 
         # ¿Existe contacto en Brevo?
-        response = requests.get(
-            BREVO_GET_CONTACT_API_URL.format(email=email_id),
-            headers=headers,
-            timeout=15
-        )
+        response = requests.get(BREVO_GET_CONTACT_API_URL.format(email=email_id), headers=headers, timeout=15)
 
         if response.status_code == 200:
             print(f"⚠️ {email} ya existe en Brevo. Se actualizará.")
             update_payload = {"attributes": attributes}
             if BREVO_LIST_ID > 0:
                 update_payload["listIds"] = [BREVO_LIST_ID]
-                update_payload["unlinkListIds"] = []  # no quitar de otras
+                update_payload["unlinkListIds"] = []
 
             update_response = requests.put(
                 BREVO_GET_CONTACT_API_URL.format(email=email_id),
@@ -249,9 +279,10 @@ def receive_webhook():
                 headers=headers,
                 timeout=15
             )
-            if update_response.status_code == 200:
-                # 🔔 (Opcional) avisar también en actualización:
-                # send_internal_alert(created=False, email=email, attrs=attributes)
+
+            if update_response.status_code in (200, 204):
+                # 🔔 Enviamos alerta también en actualización (útil para depurar)
+                send_internal_alert(created=False, email=email, attrs=attributes)
                 return jsonify({"message": "Contacto actualizado en Brevo"}), 200
             else:
                 print("❌ Brevo update ERROR:", update_response.status_code, update_response.text[:500])
@@ -264,12 +295,7 @@ def receive_webhook():
             if BREVO_LIST_ID > 0:
                 contact_data["listIds"] = [BREVO_LIST_ID]
 
-            create_response = requests.post(
-                BREVO_API_URL,
-                json=contact_data,
-                headers=headers,
-                timeout=15
-            )
+            create_response = requests.post(BREVO_API_URL, json=contact_data, headers=headers, timeout=15)
 
             if create_response.status_code == 201:
                 # 🔔 AVISO por Zoho al crear
@@ -279,9 +305,8 @@ def receive_webhook():
                 print("❌ Brevo create ERROR:", create_response.status_code, create_response.text[:500])
                 return jsonify({"error": "No se pudo crear el contacto en Brevo",
                                 "details": create_response.text}), 400
-
         else:
-            print("❌ Brevo exists-check ERROR:", response.status_code, response.text[:500])
+            print("❌ Brevo check ERROR:", response.status_code, response.text[:500])
             return jsonify({"error": "Error al verificar si el contacto existe",
                             "details": response.text}), 400
 
