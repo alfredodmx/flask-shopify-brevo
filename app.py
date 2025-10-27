@@ -1,13 +1,22 @@
+from flask import Flask, request, jsonify
+import requests
+import json
+import os  # <-- importa os antes de usar getenv
 import smtplib
 from email.mime.text import MIMEText
 from email.utils import formataddr
 
-ALERT_SMTP_HOST = os.getenv("ALERT_SMTP_HOST")
+app = Flask(__name__)
+
+# =========================
+#  SMTP (Zoho) - Alertas
+# =========================
+ALERT_SMTP_HOST = os.getenv("ALERT_SMTP_HOST")          # ej. smtp.zoho.com
 ALERT_SMTP_PORT = int(os.getenv("ALERT_SMTP_PORT", "587"))
-ALERT_SMTP_USER = os.getenv("ALERT_SMTP_USER")
-ALERT_SMTP_PASS = os.getenv("ALERT_SMTP_PASS")
-ALERT_FROM      = os.getenv("ALERT_FROM")
-ALERT_TO        = os.getenv("ALERT_TO", "")
+ALERT_SMTP_USER = os.getenv("ALERT_SMTP_USER")          # ej. alertas@tu-dominio.com
+ALERT_SMTP_PASS = os.getenv("ALERT_SMTP_PASS")          # pass SMTP / App Password
+ALERT_FROM      = os.getenv("ALERT_FROM")               # mismo buzón de Zoho
+ALERT_TO        = os.getenv("ALERT_TO", "")             # "ventas@...,soporte@...,gerencia@..."
 
 def send_internal_alert(created: bool, email: str, attrs: dict):
     """Envía un correo interno vía SMTP (Zoho)."""
@@ -50,24 +59,18 @@ def send_internal_alert(created: bool, email: str, attrs: dict):
         print("❌ Error enviando alerta SMTP:", str(e))
 
 
-from flask import Flask, request, jsonify
-import requests
-import json
-import os
-
-app = Flask(__name__)
-
-# 🔑 Variables de entorno requeridas
+# =========================
+#  Brevo / Shopify config
+# =========================
 BREVO_API_KEY = os.getenv("BREVO_API_KEY")
 SHOPIFY_ACCESS_TOKEN = os.getenv("SHOPIFY_ACCESS_TOKEN")
-SHOPIFY_STORE = "uaua8v-s7.myshopify.com"  # Reemplaza con tu dominio real de Shopify
+SHOPIFY_STORE = "uaua8v-s7.myshopify.com"  # tu dominio real de Shopify
 
-# ✅ ID de la LISTA de Brevo (p.ej. 7 = "LEADS ESPACIO CONTAINER HOUSE")
-#   Configúralo en Render → Environment como BREVO_LIST_ID=7
+# Lista de Brevo (ID 7 = LEADS ESPACIO CONTAINER HOUSE)
 BREVO_LIST_ID = int(os.getenv("BREVO_LIST_ID", "0"))
 
 if not BREVO_API_KEY or not SHOPIFY_ACCESS_TOKEN:
-    print("❌ ERROR: Las API Keys no están configuradas. Define 'BREVO_API_KEY' y 'SHOPIFY_ACCESS_TOKEN'.")
+    print("❌ ERROR: Falta BREVO_API_KEY o SHOPIFY_ACCESS_TOKEN.")
     exit(1)
 
 # Endpoints Brevo
@@ -77,7 +80,10 @@ BREVO_GET_CONTACT_API_URL = "https://api.sendinblue.com/v3/contacts/{email}"
 # Endpoint Shopify GraphQL
 SHOPIFY_GRAPHQL_URL = f"https://{SHOPIFY_STORE}/admin/api/2023-10/graphql.json"
 
-# 📌 Función para obtener la URL pública de un archivo (MediaImage o GenericFile)
+
+# =========================
+#  Helpers Shopify
+# =========================
 def get_public_file_url(gid):
     if not gid:
         return None
@@ -86,15 +92,13 @@ def get_public_file_url(gid):
         "Content-Type": "application/json"
     }
 
-    # 1) Intento como MediaImage
+    # 1) MediaImage
     query_image = {
         "query": f"""
             query {{
               node(id: "{gid}") {{
                 ... on MediaImage {{
-                  image {{
-                    url
-                  }}
+                  image {{ url }}
                 }}
               }}
             }}
@@ -109,16 +113,14 @@ def get_public_file_url(gid):
                 and data_image["data"]["node"]["image"].get("url")):
             return data_image["data"]["node"]["image"]["url"]
     except requests.exceptions.RequestException as e:
-        print(f"⚠️ Error al consultar como MediaImage para GID {gid}: {e}")
+        print(f"⚠️ MediaImage GID {gid}: {e}")
 
-    # 2) Intento como GenericFile
+    # 2) GenericFile
     query_file = {
         "query": f"""
             query {{
               node(id: "{gid}") {{
-                ... on GenericFile {{
-                  url
-                }}
+                ... on GenericFile {{ url }}
               }}
             }}
         """
@@ -130,15 +132,15 @@ def get_public_file_url(gid):
         if data_file and data_file.get("data") and data_file["data"].get("node") and data_file["data"]["node"].get("url"):
             return data_file["data"]["node"]["url"]
         else:
-            print(f"⚠️ No se encontró URL pública como GenericFile para GID {gid}. Respuesta: {data_file}")
+            print(f"⚠️ No URL pública como GenericFile para GID {gid}. Respuesta: {data_file}")
             return None
     except requests.exceptions.RequestException as e:
-        print(f"⚠️ Error al consultar como GenericFile para GID {gid}: {e}")
+        print(f"⚠️ GenericFile GID {gid}: {e}")
         return None
 
     return None
 
-# 📌 Metacampos del cliente desde Shopify (REST)
+
 def get_customer_metafields(customer_id):
     shopify_url = f"https://{SHOPIFY_STORE}/admin/api/2023-10/customers/{customer_id}/metafields.json"
     headers = {
@@ -157,7 +159,6 @@ def get_customer_metafields(customer_id):
         indica_tu_presupuesto = next((m["value"] for m in metafields if m["key"] == "indica_tu_presupuesto"), "Sin presupuesto")
         tipo_de_persona = next((m["value"] for m in metafields if m["key"] == "tipo_de_persona"), "Sin persona")
 
-        # URL pública del plano si hay GID
         tengo_un_plano_url = get_public_file_url(tengo_un_plano_gid) if tengo_un_plano_gid else "Sin plano"
 
         return (modelo, precio, describe_lo_que_quieres, tengo_un_plano_url,
@@ -166,7 +167,10 @@ def get_customer_metafields(customer_id):
         print("❌ Error obteniendo metacampos de Shopify:", e)
         return "Error", "Error", "Error", "Error", "Error", "Error", "Error"
 
-# 📩 Webhook que recibe Shopify
+
+# =========================
+#  Webhook principal
+# =========================
 @app.route('/webhook/shopify', methods=['POST'])
 def receive_webhook():
     try:
@@ -191,14 +195,14 @@ def receive_webhook():
             print("❌ ERROR: No se recibió un email o ID de cliente válido.")
             return jsonify({"error": "Falta email o ID de cliente"}), 400
 
-        # 🔍 Metacampos desde Shopify
+        # Metacampos Shopify
         (modelo, precio, describe_lo_que_quieres, tengo_un_plano,
          tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona) = get_customer_metafields(customer_id)
 
-        print("Valores de metacampos:", modelo, precio, describe_lo_que_quieres, tengo_un_plano,
+        print("Metacampos:", modelo, precio, describe_lo_que_quieres, tengo_un_plano,
               tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona)
 
-        # 🎯 Atributos comunes para Brevo
+        # Atributos para Brevo
         attributes = {
             "NOMBRE": first_name,
             "APELLIDOS": last_name,
@@ -209,62 +213,52 @@ def receive_webhook():
             "MODELO_CABANA": modelo,
             "PRECIO_CABANA": precio,
             "DESCRIPCION_CLIENTE": describe_lo_que_quieres,
-            "PLANO_CLIENTE": tengo_un_plano,   # URL pública o "Sin plano"
+            "PLANO_CLIENTE": tengo_un_plano,
             "DIRECCION_CLIENTE": tu_direccin_actual,
             "PRESUPUESTO_CLIENTE": indica_tu_presupuesto,
             "TIPO_DE_PERSONA": tipo_de_persona
         }
 
-        headers = {
-            "api-key": BREVO_API_KEY,
-            "Content-Type": "application/json"
-        }
+        headers = {"api-key": BREVO_API_KEY, "Content-Type": "application/json"}
 
-        # 📌 Verificar si el contacto existe
+        # ¿Existe contacto en Brevo?
         response = requests.get(BREVO_GET_CONTACT_API_URL.format(email=email), headers=headers)
 
         if response.status_code == 200:
-            # 🔁 Actualizar contacto existente
-            print(f"⚠️ El contacto {email} ya existe en Brevo. Se actualizará.")
-            update_payload = {
-                "attributes": attributes
-            }
-            # Agregar a la lista automáticamente si BREVO_LIST_ID > 0
+            print(f"⚠️ {email} ya existe en Brevo. Se actualizará.")
+            update_payload = {"attributes": attributes}
             if BREVO_LIST_ID > 0:
                 update_payload["listIds"] = [BREVO_LIST_ID]
-                update_payload["unlinkListIds"] = []  # no quitar de otras listas
+                update_payload["unlinkListIds"] = []
 
             update_response = requests.put(
                 BREVO_GET_CONTACT_API_URL.format(email=email),
                 json=update_payload,
                 headers=headers
             )
-
             if update_response.status_code == 200:
+                # 🔔 (Opcional) avisar también en actualización:
+                # send_internal_alert(created=False, email=email, attrs=attributes)
                 return jsonify({"message": "Contacto actualizado en Brevo"}), 200
             else:
                 return jsonify({"error": "No se pudo actualizar el contacto en Brevo",
                                 "details": update_response.text}), 400
 
         elif response.status_code == 404:
-            # 🆕 Crear contacto nuevo
-            print(f"✅ El contacto {email} no existe. Se creará uno nuevo.")
-            contact_data = {
-                "email": email,
-                "attributes": attributes
-            }
-            # Agregar a la lista automáticamente si BREVO_LIST_ID > 0
+            print(f"✅ {email} no existe. Se creará nuevo.")
+            contact_data = {"email": email, "attributes": attributes}
             if BREVO_LIST_ID > 0:
                 contact_data["listIds"] = [BREVO_LIST_ID]
 
             create_response = requests.post(BREVO_API_URL, json=contact_data, headers=headers)
 
             if create_response.status_code == 201:
+                # 🔔 AVISO por Zoho al crear
+                send_internal_alert(created=True, email=email, attrs=attributes)
                 return jsonify({"message": "Contacto creado en Brevo con metacampos"}), 201
             else:
                 return jsonify({"error": "No se pudo crear el contacto en Brevo",
                                 "details": create_response.text}), 400
-
         else:
             return jsonify({"error": "Error al verificar si el contacto existe",
                             "details": response.text}), 400
@@ -273,7 +267,10 @@ def receive_webhook():
         print("❌ ERROR procesando el webhook:", str(e))
         return jsonify({"error": "Error interno"}), 500
 
-# 🔥 Iniciar el servidor (Render)
+
+# =========================
+#  Server (Render)
+# =========================
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
