@@ -1,222 +1,225 @@
-# app.py
-# -*- coding: utf-8 -*-
-
 import os
 import json
-import logging
-from typing import List, Optional
-
-import requests
 from flask import Flask, request, jsonify
+import requests
 
-# -----------------------------------------------------------------------------
-# Config básica de Flask + logs
-# -----------------------------------------------------------------------------
-app = Flask(__name__)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+# =========================
+# Config & helpers
+# =========================
 
-# -----------------------------------------------------------------------------
-# Utilidades
-# -----------------------------------------------------------------------------
-def env(name: str, default: Optional[str] = None) -> Optional[str]:
-    """Lee variables de entorno con valor por defecto."""
-    return os.environ.get(name, default)
-
-def split_recipients(csv_emails: str) -> List[str]:
-    """Convierte 'a@b.com, c@d.com' → ['a@b.com', 'c@d.com'] (limpiando espacios)."""
-    if not csv_emails:
+def _split_emails(raw: str) -> list[str]:
+    if not raw:
         return []
-    return [e.strip() for e in csv_emails.split(",") if e.strip()]
+    seps = [",", ";", " "]
+    out = [raw]
+    for s in seps:
+        next_out = []
+        for chunk in out:
+            next_out.extend(chunk.split(s))
+        out = next_out
+    return [x.strip() for x in out if x and "@" in x]
 
-# -----------------------------------------------------------------------------
-# Config leída desde ENV (usa los nombres que mostraste en Render)
-# -----------------------------------------------------------------------------
-ALERT_FROM_NAME  = env("ALERT_FROM_NAME", "Leads")
-ALERT_FROM_EMAIL = env("ALERT_FROM_EMAIL") or env("ALERT_FROM")
-ALERT_TO_CSV     = env("ALERT_TO", "")  # puede ser "a@x.com,b@y.com"
-BREVO_API_KEY    = env("BREVO_API_KEY", "")
+PORT = int(os.environ.get("PORT", "10000"))
+BREVO_API_KEY   = os.environ.get("BREVO_API_KEY", "").strip()
+BREVO_BASE      = os.environ.get("BREVO_BASE", "https://api.brevo.com/v3").rstrip("/")
+ALERT_FROM_NAME = os.environ.get("ALERT_FROM_NAME", "Leads").strip()
+ALERT_FROM_EMAIL= os.environ.get("ALERT_FROM_EMAIL", "").strip()   # ej: info@espaciocontainerhouse.cl
+ALERT_TO        = _split_emails(os.environ.get("ALERT_TO", "alfredodmx@gmail.com,alfredodmxf@gmail.com"))
+BREVO_LIST_ID   = os.environ.get("BREVO_LIST_ID", "7").strip()     # opcional
 
-# Opcional: si más tarde quieres usar listas de Brevo
-BREVO_LIST_ID    = env("BREVO_LIST_ID")
+# Validación mínima en arranque (solo imprime, no rompe)
+if not BREVO_API_KEY:
+    print("⚠️  BREVO_API_KEY vacío (setéalo en Render).")
+if not ALERT_FROM_EMAIL:
+    print("⚠️  ALERT_FROM_EMAIL vacío (setéalo en Render).")
+if not ALERT_TO:
+    print("⚠️  ALERT_TO vacío (setéalo en Render).")
 
-# -----------------------------------------------------------------------------
-# Cliente Brevo (API v3)
-# -----------------------------------------------------------------------------
-BREVO_BASE = "https://api.brevo.com/v3"
+app = Flask(__name__)
 
-def brevo_send_email(
-    to_emails: List[str],
-    subject: str,
-    html: str,
-    tags: Optional[List[str]] = None,
-    from_email: Optional[str] = None,
-    from_name: Optional[str] = None,
-) -> dict:
-    """
-    Envía correo por Brevo /v3/smtp/email.
-    Lanza excepción si la API responde != 2xx.
-    """
-    if not BREVO_API_KEY:
-        raise RuntimeError("Falta BREVO_API_KEY en variables de entorno.")
+# =========================
+# Brevo client utils
+# =========================
 
-    from_email = from_email or ALERT_FROM_EMAIL
-    from_name  = from_name  or ALERT_FROM_NAME
+def brevo_headers_json() -> dict:
+    return {
+        "accept": "application/json",
+        "content-type": "application/json",
+        "api-key": BREVO_API_KEY,
+    }
 
-    if not from_email:
-        raise RuntimeError("Falta ALERT_FROM_EMAIL/ALERT_FROM en variables de entorno.")
+def brevo_get_account() -> dict:
+    r = requests.get(f"{BREVO_BASE}/account", headers=brevo_headers_json(), timeout=20)
+    print(f"➡️ Brevo GET /account status={r.status_code}")
+    print(f"⬅️ body={r.text[:1000]}")
+    r.raise_for_status()
+    return r.json()
 
+def brevo_send_email(to_list: list[str], subject: str, html: str, tags: list[str] | None = None) -> dict:
     payload = {
-        "sender": {"name": from_name, "email": from_email},
-        "to": [{"email": e} for e in to_emails],
+        "sender": {"name": ALERT_FROM_NAME, "email": ALERT_FROM_EMAIL},
+        "to": [{"email": x} for x in to_list],
         "subject": subject,
         "htmlContent": html,
     }
     if tags:
         payload["tags"] = tags
 
-    headers = {
-        "accept": "application/json",
-        "content-type": "application/json",
-        "api-key": BREVO_API_KEY,
-    }
-
-    app.logger.info(f"➡️ Brevo API send: to={to_emails}, subject={subject}")
-    r = requests.post(f"{BREVO_BASE}/smtp/email", headers=headers, json=payload, timeout=20)
-    app.logger.info(f"⬅️ Brevo API status={r.status_code}, body={r.text[:500]}")
-    r.raise_for_status()
-    return r.json() if r.text else {}
-
-def brevo_get_account() -> dict:
-    headers = {"accept": "application/json", "api-key": BREVO_API_KEY}
-    r = requests.get(f"{BREVO_BASE}/account", headers=headers, timeout=15)
+    r = requests.post(f"{BREVO_BASE}/smtp/email", headers=brevo_headers_json(), json=payload, timeout=25)
+    print(f"➡️ Brevo POST /smtp/email status={r.status_code}")
+    print(f"⬅️ body={r.text[:1000]}")
     r.raise_for_status()
     return r.json()
 
 def brevo_get_events_by_email(email: str, limit: int = 20, offset: int = 0) -> dict:
-    headers = {"accept": "application/json", "api-key": BREVO_API_KEY}
     params = {"email": email, "limit": limit, "offset": offset}
-    r = requests.get(f"{BREVO_BASE}/smtp/emails", headers=headers, params=params, timeout=15)
+    r = requests.get(f"{BREVO_BASE}/smtp/emails", headers=brevo_headers_json(), params=params, timeout=20)
+    print(f"➡️ Brevo GET /smtp/emails?email={email} status={r.status_code}")
+    print(f"⬅️ body={r.text[:1200]}")
     r.raise_for_status()
-    # Nota: si no hay eventos, Brevo puede devolver {} (vacío)
     try:
         return r.json()
     except Exception:
+        # algunos endpoints de Brevo devuelven vacío "{}"
         return {}
 
-# -----------------------------------------------------------------------------
-# Rutas
-# -----------------------------------------------------------------------------
+def brevo_get_blocked(email: str) -> dict:
+    params = {"email": email}
+    r = requests.get(f"{BREVO_BASE}/smtp/blockedContacts", headers=brevo_headers_json(), params=params, timeout=20)
+    print(f"➡️ Brevo GET /smtp/blockedContacts?email={email} status={r.status_code}")
+    print(f"⬅️ body={r.text[:1000]}")
+    r.raise_for_status()
+    return r.json()
+
+# =========================
+# Routes
+# =========================
+
 @app.route("/", methods=["GET"])
 def root_ok():
-    return jsonify(ok=True, service="flask-shopify-brevo", msg="UP")
+    return jsonify(ok=True, msg="flask-shopify-brevo up", port=PORT), 200
 
-# ---- Debug: ver variables mínimas (sin exponer secretos) --------------------
 @app.route("/debug/brevo/env", methods=["GET"])
-def debug_brevo_env():
-    data = {
-        "ALERT_FROM_EMAIL": bool(ALERT_FROM_EMAIL),
-        "ALERT_FROM_NAME": ALERT_FROM_NAME,
-        "ALERT_TO_count": len(split_recipients(ALERT_TO_CSV)),
+def debug_env():
+    safe_env = {
         "BREVO_API_KEY_loaded": bool(BREVO_API_KEY),
-        "BREVO_LIST_ID": BREVO_LIST_ID or None,
+        "BREVO_BASE": BREVO_BASE,
+        "ALERT_FROM_NAME": ALERT_FROM_NAME,
+        "ALERT_FROM_EMAIL": bool(ALERT_FROM_EMAIL),
+        "ALERT_TO_count": len(ALERT_TO),
+        "BREVO_LIST_ID": BREVO_LIST_ID,
     }
-    return jsonify(ok=True, env=data)
+    return jsonify(ok=True, env=safe_env), 200
 
-# ---- Debug: ver cuenta Brevo asociada a la API key --------------------------
 @app.route("/debug/brevo/account", methods=["GET"])
-def debug_brevo_account():
+def debug_account():
     try:
-        acc = brevo_get_account()
-        return jsonify(ok=True, account=acc)
+        account = brevo_get_account()
+        return jsonify(ok=True, account=account), 200
     except Exception as e:
-        app.logger.exception("Error consultando /v3/account")
+        print(f"❌ /debug/brevo/account error: {e}")
         return jsonify(ok=False, error=str(e)), 500
 
-# ---- Debug: enviar correo a ALERT_TO ----------------------------------------
-@app.route("/debug/alert", methods=["POST"])
+@app.route("/debug/alert", methods=["POST", "GET"])
 def debug_alert():
-    recipients = split_recipients(ALERT_TO_CSV)
-    if not recipients:
-        return jsonify(ok=False, error="ALERT_TO vacío o inválido"), 400
-
+    """
+    Envía una alerta rápida usando ALERT_TO desde ENV.
+    """
     try:
-        resp = brevo_send_email(
-            recipients,
-            subject="🔔 Alerta de prueba (Render/Debug)",
-            html="<p>Hola 👋, esto es un test enviado desde el endpoint /debug/alert</p>",
-            tags=["render-debug"],
-        )
+        subject = "Alerta de prueba desde Render"
+        html = "<p>Hola, este es un test desde /debug/alert</p>"
+        resp = brevo_send_email(ALERT_TO, subject, html, tags=["render-debug", "shopify-webhook"])
         return jsonify(ok=True, msg="Prueba de alerta enviada", brevo=resp), 200
     except Exception as e:
-        app.logger.exception("Error enviando alerta de prueba")
+        print(f"❌ /debug/alert error: {e}")
         return jsonify(ok=False, error=str(e)), 500
 
-# ---- Debug: consultar eventos por destinatario ------------------------------
+@app.route("/debug/brevo/send", methods=["POST"])
+def debug_brevo_send():
+    """
+    Envía a un destinatario arbitrario.
+    Body JSON:
+    {
+      "to": "correo@dominio.com",
+      "subject": "opcional",
+      "html": "<p>opcional</p>",
+      "tags": ["render-debug"]
+    }
+    """
+    j = {}
+    try:
+        j = request.get_json(force=True) or {}
+    except Exception:
+        pass
+
+    to = j.get("to")
+    subject = j.get("subject") or "Prueba directa API"
+    html = j.get("html") or "<p>Hola desde /debug/brevo/send</p>"
+    tags = j.get("tags")
+
+    if not to:
+        return jsonify(ok=False, error="Falta 'to'"), 400
+
+    try:
+        resp = brevo_send_email([to], subject, html, tags=tags)
+        return jsonify(ok=True, brevo=resp), 200
+    except Exception as e:
+        print(f"❌ /debug/brevo/send error: {e}")
+        return jsonify(ok=False, error=str(e)), 500
+
 @app.route("/debug/brevo/events", methods=["GET"])
 def debug_brevo_events():
+    """
+    Consulta eventos por destinatario.
+    GET /debug/brevo/events?email=alguien@dominio.com&limit=20&offset=0
+    """
+    email = request.args.get("email", "").strip()
+    if not email:
+        return jsonify(ok=False, error="Falta parámetro ?email="), 400
+    limit = int(request.args.get("limit", "20"))
+    offset = int(request.args.get("offset", "0"))
+    try:
+        data = brevo_get_events_by_email(email, limit=limit, offset=offset)
+        return jsonify(ok=True, email=email, events=data), 200
+    except Exception as e:
+        print(f"❌ /debug/brevo/events error: {e}")
+        return jsonify(ok=False, error=str(e)), 500
+
+@app.route("/debug/brevo/blocked", methods=["GET"])
+def debug_brevo_blocked():
+    """
+    Verifica si un destinatario está bloqueado en Brevo.
+    GET /debug/brevo/blocked?email=alguien@dominio.com
+    """
     email = request.args.get("email", "").strip()
     if not email:
         return jsonify(ok=False, error="Falta parámetro ?email="), 400
     try:
-        events = brevo_get_events_by_email(email=email, limit=20, offset=0)
-        return jsonify(ok=True, email=email, events=events), 200
+        data = brevo_get_blocked(email)
+        return jsonify(ok=True, email=email, data=data), 200
     except Exception as e:
-        app.logger.exception("Error consultando eventos")
+        print(f"❌ /debug/brevo/blocked error: {e}")
         return jsonify(ok=False, error=str(e)), 500
 
-# ---- Webhook Shopify (ejemplo mínimo) ---------------------------------------
+# =========================
+# Shopify webhook (opcional)
+# =========================
 @app.route("/webhook/shopify", methods=["POST"])
 def webhook_shopify():
-    """
-    Recibe el webhook de customer/create (u otros) y dispara una alerta por Brevo.
-    No valida HMAC aquí (puedes agregarlo si lo necesitas).
-    """
+    raw = request.get_data(as_text=True)
+    print(f"📩 Webhook recibido (RAW): {raw[:1500]}")
     try:
-        raw = request.get_data(as_text=True) or ""
-        data = request.get_json(silent=True) or {}
-        app.logger.info(f"📩 Webhook Shopify recibido (RAW) len={len(raw)}")
-        app.logger.info(f"📩 Webhook Shopify JSON: {json.dumps(data, ensure_ascii=False)[:1000]}")
-
-        # Construye un resumen básico para el correo
-        email = data.get("email") or "sin_email"
-        first = data.get("first_name") or data.get("firstName") or ""
-        phone = data.get("phone") or ""
-        admin_id = data.get("admin_graphql_api_id") or ""
-        resumen_html = f"""
-        <h3>Nuevo evento Shopify</h3>
-        <ul>
-          <li><b>Email:</b> {email}</li>
-          <li><b>Nombre:</b> {first}</li>
-          <li><b>Tel:</b> {phone}</li>
-          <li><b>ID:</b> {admin_id}</li>
-        </ul>
-        <pre style="white-space:pre-wrap;font-size:12px;background:#f7f7f7;padding:8px;border:1px solid #eee;">
-        {json.dumps(data, ensure_ascii=False, indent=2)[:4000]}
-        </pre>
-        """
-
-        recipients = split_recipients(ALERT_TO_CSV)
-        if not recipients:
-            return jsonify(ok=False, error="ALERT_TO vacío o inválido"), 400
-
-        resp = brevo_send_email(
-            recipients,
-            subject=f"🛒 Shopify webhook: {email}",
-            html=resumen_html,
-            tags=["shopify-webhook"],
-        )
-        return jsonify(ok=True, brevo=resp), 201
-
+        data = request.get_json(force=True)
+        print("📩 Webhook recibido de Shopify (JSON):")
+        print(json.dumps(data, ensure_ascii=False, indent=4)[:2000])
     except Exception as e:
-        app.logger.exception("Error procesando webhook Shopify")
-        return jsonify(ok=False, error=str(e)), 500
+        print(f"⚠️ No JSON en webhook: {e}")
 
-# -----------------------------------------------------------------------------
-# Main (para correr en local: python app.py)
-# -----------------------------------------------------------------------------
+    # Ejemplo mínimo de procesamiento…
+    return jsonify(ok=True), 201
+
+# =========================
+# Entrypoint (para debug local)
+# =========================
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=PORT, debug=True)
