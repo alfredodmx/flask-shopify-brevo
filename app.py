@@ -1,3 +1,55 @@
+import smtplib
+from email.mime.text import MIMEText
+from email.utils import formataddr
+
+ALERT_SMTP_HOST = os.getenv("ALERT_SMTP_HOST")
+ALERT_SMTP_PORT = int(os.getenv("ALERT_SMTP_PORT", "587"))
+ALERT_SMTP_USER = os.getenv("ALERT_SMTP_USER")
+ALERT_SMTP_PASS = os.getenv("ALERT_SMTP_PASS")
+ALERT_FROM      = os.getenv("ALERT_FROM")
+ALERT_TO        = os.getenv("ALERT_TO", "")
+
+def send_internal_alert(created: bool, email: str, attrs: dict):
+    """Envía un correo interno vía SMTP (Zoho)."""
+    if not (ALERT_SMTP_HOST and ALERT_SMTP_USER and ALERT_SMTP_PASS and ALERT_FROM and ALERT_TO):
+        print("⚠️ SMTP de alertas no configurado; omito envío.")
+        return
+
+    subject = ("🆕 Nuevo lead" if created else "ℹ️ Lead actualizado") + f": {email}"
+
+    html = f"""
+    <h2>{'Nuevo lead' if created else 'Lead actualizado'} desde Shopify</h2>
+    <p><b>Email:</b> {email}</p>
+    <p><b>Nombre:</b> {attrs.get('NOMBRE','')} {attrs.get('APELLIDOS','')}</p>
+    <p><b>Teléfono:</b> {attrs.get('TELEFONO_WHATSAPP','')}</p>
+    <hr/>
+    <p><b>Modelo:</b> {attrs.get('MODELO_CABANA','')}</p>
+    <p><b>Precio:</b> {attrs.get('PRECIO_CABANA','')}</p>
+    <p><b>Descripción:</b> {attrs.get('DESCRIPCION_CLIENTE','')}</p>
+    <p><b>Plano (URL):</b> {attrs.get('PLANO_CLIENTE','')}</p>
+    <p><b>Dirección:</b> {attrs.get('DIRECCION_CLIENTE','')}</p>
+    <p><b>Presupuesto:</b> {attrs.get('PRESUPUESTO_CLIENTE','')}</p>
+    <p><b>Tipo de persona:</b> {attrs.get('TIPO_DE_PERSONA','')}</p>
+    <hr/>
+    <p>Fuente: Shopify → Render → Brevo (Lista #7)</p>
+    """
+
+    msg = MIMEText(html, "html", "utf-8")
+    msg["Subject"] = subject
+    msg["From"] = formataddr(("Leads", ALERT_FROM))
+    to_list = [t.strip() for t in ALERT_TO.split(",") if t.strip()]
+    msg["To"] = ", ".join(to_list)
+
+    try:
+        with smtplib.SMTP(ALERT_SMTP_HOST, ALERT_SMTP_PORT) as server:
+            server.starttls()
+            server.login(ALERT_SMTP_USER, ALERT_SMTP_PASS)
+            server.sendmail(ALERT_FROM, to_list, msg.as_string())
+        print(f"📧 Alerta enviada a: {to_list}")
+    except Exception as e:
+        print("❌ Error enviando alerta SMTP:", str(e))
+
+
 from flask import Flask, request, jsonify
 import requests
 import json
