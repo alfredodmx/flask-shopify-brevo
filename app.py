@@ -1,128 +1,183 @@
-import os
-import json
-import logging
-from typing import List, Tuple, Optional, Dict
-
-import requests
+# app.py
 from flask import Flask, request, jsonify
+import os, json, re, logging
+import requests
 
-# -----------------------------------------------------------------------------
-# Config & Logger
-# -----------------------------------------------------------------------------
 app = Flask(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger("app")
 
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
-log = logging.getLogger(__name__)
+# ====== ENV obligatorios (Render) ======
+BREVO_API_KEY        = os.getenv("BREVO_API_KEY")            # API key HTTP de Brevo
+BREVO_SENDER         = os.getenv("BREVO_SENDER")             # p.ej. info@espaciocontainerhouse.cl (verificado)
+SHOPIFY_ACCESS_TOKEN = os.getenv("SHOPIFY_ACCESS_TOKEN")
+SHOPIFY_STORE        = os.getenv("SHOPIFY_STORE")            # p.ej. uaua8v-s7.myshopify.com
+NOTIFY_EMAILS        = os.getenv("NOTIFY_EMAILS", "")        # comas: "a@a.com,b@b.com,c@c.com"
 
-# ENV (Render -> Dashboard -> Environment)
-BREVO_API_KEY = os.getenv("BREVO_API_KEY", "").strip()
-SHOPIFY_ACCESS_TOKEN = os.getenv("SHOPIFY_ACCESS_TOKEN", "").strip()
-SHOPIFY_STORE = os.getenv("SHOPIFY_STORE", "").strip() or "uaua8v-s7.myshopify.com"
-BREVO_SENDER = os.getenv("BREVO_SENDER", "").strip() or "info@espaciocontainerhouse.cl"
+if not BREVO_API_KEY or not BREVO_SENDER or not SHOPIFY_ACCESS_TOKEN or not SHOPIFY_STORE:
+    log.error("ENV faltantes: BREVO_API_KEY, BREVO_SENDER, SHOPIFY_ACCESS_TOKEN, SHOPIFY_STORE son requeridos.")
+    # No forzamos exit para poder ver el / de vida, pero fallarán los endpoints que los necesitan.
 
-# Lista de correos separados por coma
-NOTIFY_EMAILS = [
-    e.strip() for e in os.getenv("NOTIFY_EMAILS", "").split(",") if e.strip()
-]
+# ====== Constantes de API ======
+BREVO_CONTACT_GET     = "https://api.brevo.com/v3/contacts/{email}"
+BREVO_CONTACT_CREATE  = "https://api.brevo.com/v3/contacts"
+BREVO_SEND_EMAIL      = "https://api.brevo.com/v3/smtp/email"
+SHOPIFY_GRAPHQL_URL   = f"https://{SHOPIFY_STORE}/admin/api/2023-10/graphql.json"
+SHOPIFY_METAFIELDS_REST = "https://{store}/admin/api/2023-10/customers/{cid}/metafields.json"
 
-# Shopify endpoints
-SHOPIFY_GRAPHQL_URL = f"https://{SHOPIFY_STORE}/admin/api/2023-10/graphql.json"
-SHOPIFY_API_PREFIX = f"https://{SHOPIFY_STORE}/admin/api/2023-10"
+# ====== Utilidades ======
+def split_emails(csv: str):
+    return [e.strip() for e in csv.split(",") if e.strip()]
 
-# Brevo endpoints
-BREVO_EMAIL_URL = "https://api.brevo.com/v3/smtp/email"
-BREVO_ACCOUNT_URL = "https://api.brevo.com/v3/account"
-BREVO_CONTACT_URL = "https://api.brevo.com/v3/contacts"
-BREVO_GET_CONTACT_URL = "https://api.brevo.com/v3/contacts/{email}"
-
-# Pequeña ayuda para evitar errores comunes de configuración
-if not BREVO_API_KEY:
-    log.warning("BREVO_API_KEY no está definido en ENV.")
-if not SHOPIFY_ACCESS_TOKEN:
-    log.warning("SHOPIFY_ACCESS_TOKEN no está definido en ENV.")
-if not NOTIFY_EMAILS:
-    log.info("NOTIFY_EMAILS está vacío; puedes pasar ?to= en /debug/alert para probar.")
-
-# -----------------------------------------------------------------------------
-# Utils
-# -----------------------------------------------------------------------------
-def _mask_secret(value: str, keep: int = 4) -> str:
-    if not value:
-        return "∅"
-    if len(value) <= keep:
-        return "*" * len(value)
-    return value[:keep] + "…" + "*" * (len(value) - keep - 1)
-
-def _shopify_headers() -> Dict[str, str]:
+def brevo_headers():
     return {
-        "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
-        "Content-Type": "application/json",
-    }
-
-def _brevo_headers(json_ct: bool = True) -> Dict[str, str]:
-    h = {
         "api-key": BREVO_API_KEY,
         "accept": "application/json",
+        "content-type": "application/json",
     }
-    if json_ct:
-        h["content-type"] = "application/json"
-    return h
 
-# -----------------------------------------------------------------------------
-# Brevo: envío de emails por API
-# -----------------------------------------------------------------------------
-def send_brevo_email(
-    to_emails: List[str],
-    subject: str,
-    html: str,
-    tags: Optional[List[str]] = None,
-    sender_name: str = "Leads",
-    sender_email: Optional[str] = None,
-    timeout: int = 30,
-) -> Tuple[int, dict]:
+def normalize_phone_cl(raw: str) -> str | None:
     """
-    Envía correo vía Brevo API.
-    Devuelve (status_code, body_dict_or_raw).
+    Normaliza teléfonos chilenos a E.164 (+56).
+    Acepta entradas con espacios, guiones, ( ), etc.
+    Regresa None si no es posible normalizar.
+    Reglas simples:
+      - Quitar todo excepto dígitos.
+      - Quitar 0 inicial si lo hay (discado nacional).
+      - Si empieza con 56 y tiene 11 dígitos totales: ok -> +{num}
+      - Si tiene 9 dígitos (móvil típico 9xxxxxxxx): prefijar +56
+      - Si tiene 8 dígitos (línea fija en algunas zonas): prefijar +56 y un 2? (muy variable). Mejor rechazar.
     """
-    if not to_emails:
-        return 400, {"error": "to_emails vacío"}
+    if not raw:
+        return None
+    digits = re.sub(r"\D", "", raw)
+
+    # +56XXXXXXXXX -> a veces llega ya con 56
+    if digits.startswith("56"):
+        # móviles chilenos suelen ser 9 + 8 dígitos = 9 + 8 = 9 y con 56 delante => 11 total
+        if len(digits) == 11:
+            return f"+{digits}"
+        else:
+            return None
+
+    # Quitar 0 nacional si aplica
+    if digits.startswith("0"):
+        digits = digits[1:]
+
+    # 9 dígitos → móvil moderno (9xxxxxxxx)
+    if len(digits) == 9:
+        return f"+56{digits}"
+
+    # 8 dígitos (posible fijo sin prefijo de ciudad) → incierto, mejor no cargar
+    return None
+
+def safe_attrs_with_phone(attrs: dict, phone_value: str | None) -> dict:
+    """ Construye atributos para Brevo, con/tel si válido, sino los omite. """
+    # Atributos base (ajusta claves a tus atributos existentes en Brevo)
+    out = {
+        "NOMBRE": attrs.get("NOMBRE"),
+        "APELLIDOS": attrs.get("APELLIDOS"),
+        "MODELO_CABANA": attrs.get("MODELO_CABANA"),
+        "PRECIO_CABANA": attrs.get("PRECIO_CABANA"),
+        "DESCRIPCION_CLIENTE": attrs.get("DESCRIPCION_CLIENTE"),
+        "PLANO_CLIENTE": attrs.get("PLANO_CLIENTE"),
+        "DIRECCION_CLIENTE": attrs.get("DIRECCION_CLIENTE"),
+        "PRESUPUESTO_CLIENTE": attrs.get("PRESUPUESTO_CLIENTE"),
+        "TIPO_DE_PERSONA": attrs.get("TIPO_DE_PERSONA"),
+    }
+    if phone_value:
+        out["TELEFONO_WHATSAPP"] = phone_value
+        out["WHATSAPP"]          = phone_value
+        out["SMS"]               = phone_value
+        out["LANDLINE_NUMBER"]   = phone_value
+    # limpia None (Brevo no obliga, pero evitamos ruido)
+    return {k: v for k, v in out.items() if v not in (None, "", "Error")}
+
+def upsert_brevo_contact(email: str, attrs: dict) -> tuple[int, dict]:
+    """
+    Upsert de contacto Brevo:
+    1) GET: si 200 -> PUT (update), si 404 -> POST (create)
+    2) Si 400 por 'Invalid phone number', reintenta sin campos de teléfono
+    Retorna (status_code, body_json)
+    """
     if not BREVO_API_KEY:
-        return 400, {"error": "BREVO_API_KEY no configurado"}
+        return 500, {"error": "BREVO_API_KEY missing"}
+
+    # Intento con teléfono normalizado (si existe)
+    phone_raw = attrs.get("phone")
+    phone_e164 = normalize_phone_cl(phone_raw) if phone_raw else None
+    # Construir atributos
+    base_attrs = {
+        "NOMBRE": attrs.get("NOMBRE"),
+        "APELLIDOS": attrs.get("APELLIDOS"),
+        "MODELO_CABANA": attrs.get("MODELO_CABANA"),
+        "PRECIO_CABANA": attrs.get("PRECIO_CABANA"),
+        "DESCRIPCION_CLIENTE": attrs.get("DESCRIPCION_CLIENTE"),
+        "PLANO_CLIENTE": attrs.get("PLANO_CLIENTE"),
+        "DIRECCION_CLIENTE": attrs.get("DIRECCION_CLIENTE"),
+        "PRESUPUESTO_CLIENTE": attrs.get("PRESUPUESTO_CLIENTE"),
+        "TIPO_DE_PERSONA": attrs.get("TIPO_DE_PERSONA"),
+    }
+
+    def do_request(with_phone: bool):
+        attributes = safe_attrs_with_phone(base_attrs, phone_e164 if with_phone else None)
+        # GET (existe?)
+        r = requests.get(BREVO_CONTACT_GET.format(email=email), headers=brevo_headers(), timeout=20)
+        if r.status_code == 200:
+            payload = {"email": email, "attributes": attributes}
+            u = requests.put(BREVO_CONTACT_GET.format(email=email),
+                             headers=brevo_headers(), json=payload, timeout=20)
+            return u.status_code, (u.json() if u.headers.get("content-type","").startswith("application/json") else {"text": u.text})
+        elif r.status_code == 404:
+            payload = {"email": email, "attributes": attributes}
+            c = requests.post(BREVO_CONTACT_CREATE, headers=brevo_headers(), json=payload, timeout=20)
+            return c.status_code, (c.json() if c.headers.get("content-type","").startswith("application/json") else {"text": c.text})
+        else:
+            return r.status_code, (r.json() if r.headers.get("content-type","").startswith("application/json") else {"text": r.text})
+
+    # 1er intento con teléfono (si fue normalizado)
+    sc, body = do_request(with_phone=True)
+    if sc == 400 and isinstance(body, dict) and "message" in body and "phone" in body["message"].lower():
+        log.warning("Brevo 400 por teléfono. Reintentando sin atributos telefónicos…")
+        sc, body = do_request(with_phone=False)
+    return sc, body
+
+def send_brevo_email(to_list, subject="Alerta", html="<p>Hola</p>", tags=None) -> tuple[int, dict]:
+    """
+    Envío transaccional Brevo por API HTTP (NO SMTP).
+    to_list: lista de emails
+    tags: lista de strings (opcional)
+    """
+    if not BREVO_API_KEY or not BREVO_SENDER:
+        return 500, {"error": "BREVO_API_KEY o BREVO_SENDER missing"}
 
     payload = {
-        "sender": {"name": sender_name, "email": sender_email or BREVO_SENDER},
-        "to": [{"email": e} for e in to_emails],
+        "sender": {"email": BREVO_SENDER},
+        "to": [{"email": e} for e in to_list],
         "subject": subject,
         "htmlContent": html,
     }
     if tags:
         payload["tags"] = tags
 
+    r = requests.post(BREVO_SEND_EMAIL, headers=brevo_headers(), json=payload, timeout=25)
     try:
-        r = requests.post(BREVO_EMAIL_URL, headers=_brevo_headers(), json=payload, timeout=timeout)
-        try:
-            body = r.json()
-        except Exception:
-            body = {"raw": r.text}
-        log.info("Brevo send status=%s body=%s", r.status_code, str(body)[:500])
-        return r.status_code, body
-    except Exception as e:
-        log.error("Brevo send error: %s", e, exc_info=True)
-        return 500, {"error": str(e)}
+        body = r.json()
+    except Exception:
+        body = {"text": r.text}
+    log.info("Brevo send status=%s body=%s", r.status_code, body)
+    return r.status_code, body
 
-# -----------------------------------------------------------------------------
-# Shopify: obtener URL pública de archivo (MediaImage o GenericFile)
-# -----------------------------------------------------------------------------
-def get_public_file_url(gid: Optional[str]) -> Optional[str]:
+# ====== Shopify helpers ======
+def get_public_file_url(gid: str | None) -> str | None:
     if not gid:
         return None
-
-    # 1) Intentar como MediaImage
-    q_image = {
-        "query": f"""
+    headers = {
+        "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+        "Content-Type": "application/json"
+    }
+    # Primero intenta MediaImage
+    q1 = {"query": f"""
         query {{
           node(id: "{gid}") {{
             ... on MediaImage {{
@@ -130,277 +185,170 @@ def get_public_file_url(gid: Optional[str]) -> Optional[str]:
             }}
           }}
         }}
-        """
-    }
+    """}
     try:
-        r = requests.post(SHOPIFY_GRAPHQL_URL, headers=_shopify_headers(), json=q_image, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-        url = (
-            data.get("data", {})
-                .get("node", {})
-                .get("image", {})
-                .get("url")
-        )
+        r1 = requests.post(SHOPIFY_GRAPHQL_URL, headers=headers, json=q1, timeout=25)
+        r1.raise_for_status()
+        j1 = r1.json()
+        url = j1.get("data", {}).get("node", {}).get("image", {}).get("url")
         if url:
             return url
     except Exception as e:
-        log.warning("GraphQL MediaImage error gid=%s: %s", gid, e)
+        log.warning("MediaImage GID %s error: %s", gid, e)
 
-    # 2) Intentar como GenericFile
-    q_file = {
-        "query": f"""
+    # Luego intenta GenericFile
+    q2 = {"query": f"""
         query {{
           node(id: "{gid}") {{
-            ... on GenericFile {{
-              url
-            }}
+            ... on GenericFile {{ url }}
           }}
         }}
-        """
-    }
+    """}
     try:
-        r = requests.post(SHOPIFY_GRAPHQL_URL, headers=_shopify_headers(), json=q_file, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-        url = data.get("data", {}).get("node", {}).get("url")
-        return url
+        r2 = requests.post(SHOPIFY_GRAPHQL_URL, headers=headers, json=q2, timeout=25)
+        r2.raise_for_status()
+        j2 = r2.json()
+        url2 = j2.get("data", {}).get("node", {}).get("url")
+        if url2:
+            return url2
+        log.warning("Sin URL pública para GID %s. Respuesta: %s", gid, j2)
     except Exception as e:
-        log.warning("GraphQL GenericFile error gid=%s: %s", gid, e)
-
+        log.warning("GenericFile GID %s error: %s", gid, e)
     return None
 
-# -----------------------------------------------------------------------------
-# Shopify: metacampos de un cliente
-# -----------------------------------------------------------------------------
-def get_customer_metafields(customer_id: int) -> Tuple[str, str, str, Optional[str], str, str, str]:
-    """
-    Devuelve:
-      (modelo, precio, describe, plano_url, direccion, presupuesto, tipo_persona)
-    """
-    url = f"{SHOPIFY_API_PREFIX}/customers/{customer_id}/metafields.json"
+def get_customer_metafields(customer_id: int):
+    url = SHOPIFY_METAFIELDS_REST.format(store=SHOPIFY_STORE, cid=customer_id)
+    headers = {
+        "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+        "Content-Type": "application/json"
+    }
     try:
-        r = requests.get(url, headers=_shopify_headers(), timeout=30)
+        r = requests.get(url, headers=headers, timeout=25)
         r.raise_for_status()
         metafields = r.json().get("metafields", [])
+        def get_val(key, default=None):
+            m = next((x for x in metafields if x.get("key") == key), None)
+            return m.get("value") if m else default
 
-        def val(key: str, default: str = "Sin dato") -> str:
-            for m in metafields:
-                if m.get("key") == key:
-                    return str(m.get("value", default)).strip() or default
-            return default
-
-        modelo = val("modelo", "Sin modelo")
-        precio = val("precio", "Sin precio")
-        describe = val("describe_lo_que_quieres", "Sin descripción")
-        plano_gid = val("tengo_un_plano", "")
-        direccion = val("tu_direccin_actual", "Sin dirección")
-        presupuesto = val("indica_tu_presupuesto", "Sin presupuesto")
-        tipo_pers = val("tipo_de_persona", "Sin persona")
-
+        modelo  = get_val("modelo", "Sin modelo")
+        precio  = get_val("precio", "Sin precio")
+        descr   = get_val("describe_lo_que_quieres", "Sin descripción")
+        plano_gid = get_val("tengo_un_plano", None)
         plano_url = get_public_file_url(plano_gid) if plano_gid else None
-        return modelo, precio, describe, (plano_url or "Sin plano"), direccion, presupuesto, tipo_pers
+        direccion = get_val("tu_direccin_actual", "Sin dirección")
+        presupuesto = get_val("indica_tu_presupuesto", "Sin presupuesto")
+        persona = get_val("tipo_de_persona", "Sin persona")
 
+        return modelo, precio, descr, (plano_url or "Sin plano"), direccion, presupuesto, persona
     except Exception as e:
-        log.error("Error leyendo metacampos Shopify: %s", e, exc_info=True)
+        log.error("Metafields error: %s", e)
         return "Error", "Error", "Error", "Error", "Error", "Error", "Error"
 
-# -----------------------------------------------------------------------------
-# Brevo: crear/actualizar (upsert) contacto con atributos
-# -----------------------------------------------------------------------------
-def upsert_brevo_contact(
-    email: str,
-    attributes: Dict[str, str],
-) -> Tuple[int, dict]:
-    """
-    Si existe, actualiza; si no, crea.
-    """
-    if not BREVO_API_KEY:
-        return 400, {"error": "BREVO_API_KEY no configurado"}
-
-    # ¿Existe?
-    try:
-        g = requests.get(BREVO_GET_CONTACT_URL.format(email=email), headers=_brevo_headers(False), timeout=20)
-        exists = (g.status_code == 200)
-    except Exception as e:
-        return 500, {"error": f"Lookup contact error: {e}"}
-
-    payload = {"email": email, "attributes": attributes}
-
-    try:
-        if exists:
-            r = requests.put(BREVO_GET_CONTACT_URL.format(email=email), headers=_brevo_headers(), json=payload, timeout=30)
-        else:
-            r = requests.post(BREVO_CONTACT_URL, headers=_brevo_headers(), json=payload, timeout=30)
-
-        try:
-            body = r.json()
-        except Exception:
-            body = {"raw": r.text}
-
-        return r.status_code, body
-    except Exception as e:
-        return 500, {"error": str(e)}
-
-# -----------------------------------------------------------------------------
-# Rutas
-# -----------------------------------------------------------------------------
-@app.get("/")
+# ====== Endpoints ======
+@app.route("/", methods=["GET"])
 def root():
     return "OK", 200
 
-@app.get("/debug/env")
-def debug_env():
-    info = {
-        "shopify_store": SHOPIFY_STORE or "∅",
-        "notify_emails": NOTIFY_EMAILS,
-        "notify_count": len(NOTIFY_EMAILS),
-        "brevo_api_key_masked": _mask_secret(BREVO_API_KEY),
-        "brevo_sender": BREVO_SENDER or "∅",
-    }
-
-    # Ping Brevo /account (opcional)
-    try:
-        acc = requests.get(BREVO_ACCOUNT_URL, headers=_brevo_headers(False), timeout=12)
-        info["brevo_account_status"] = acc.status_code
-        info["brevo_account_ok"] = (acc.status_code == 200)
-        if acc.status_code != 200:
-            info["brevo_account_body"] = acc.text[:400]
-    except Exception as e:
-        info["brevo_account_error"] = str(e)
-
-    return jsonify(info), 200
-
-@app.post("/debug/alert")
+@app.route("/debug/alert", methods=["POST"])
 def debug_alert():
     """
-    Envía un correo de prueba por Brevo API.
-    Prioriza parámetros por query: ?to=a@x.com,b@y.com&subject=...&tags=t1,t2
-    JSON opcional: {"to":["a@x.com"],"subject":"...","html":"<p>..</p>","tags":["t1"]}
-    Si no hay 'to', usa NOTIFY_EMAILS.
+    Prueba manual de envío por API:
+    POST /debug/alert?to=a@a.com,b@b.com&subject=Hola
+    Body opcional: {"html":"<p>Hola</p>","tags":["test"]}
     """
-    js = request.get_json(silent=True) or {}
+    to = split_emails(request.args.get("to") or NOTIFY_EMAILS)
+    if not to:
+        return jsonify({"ok": False, "error": "Sin destinatarios (query ?to=... o NOTIFY_EMAILS)"}), 400
+    subject = request.args.get("subject") or "Alerta de prueba"
+    body = request.get_json(silent=True) or {}
+    html = body.get("html", "<p>Hola desde Render</p>")
+    tags = body.get("tags")
 
-    # to
-    qs_to = (request.args.get("to") or "").strip()
-    if qs_to:
-        to_emails = [e.strip() for e in qs_to.split(",") if e.strip()]
-    else:
-        to_emails = [e for e in js.get("to", []) if isinstance(e, str) and e.strip()]
+    sc, br = send_brevo_email(to, subject=subject, html=html, tags=tags)
+    return jsonify({"ok": sc in (200, 201, 202), "status": sc, "brevo": br, "to": to}), 200
 
-    if not to_emails:
-        to_emails = NOTIFY_EMAILS[:]
+@app.route("/webhook/brevo-events", methods=["POST"])
+def brevo_events():
+    try:
+        data = request.get_json(force=True)
+        log.info("📩 Brevo webhook event: %s", data)
+        # Aquí podrías guardar en DB si quieres
+        return "", 200
+    except Exception as e:
+        log.error("webhook Brevo error: %s", e)
+        return "", 400
 
-    if not to_emails:
-        return jsonify({"ok": False, "error": "Define NOTIFY_EMAILS en ENV o pásame ?to=correo1,correo2"}), 400
-
-    subject = request.args.get("subject") or js.get("subject") or "🔔 Prueba Render → Brevo (API)"
-    html = request.args.get("html") or js.get("html") or "<p>Funciona por API (no SMTP) 💪</p>"
-
-    tags_qs = (request.args.get("tags") or "")
-    tags = [t.strip() for t in tags_qs.split(",") if t.strip()] if tags_qs else js.get("tags", [])
-    if not tags:
-        tags = ["render-debug"]
-
-    status, body = send_brevo_email(
-        to_emails=to_emails,
-        subject=subject,
-        html=html,
-        tags=tags,
-        sender_name="Leads",
-        sender_email=BREVO_SENDER,
-    )
-    ok = 200 <= status < 300
-    return jsonify({"ok": ok, "status": status, "to": to_emails, "brevo": body}), (200 if ok else status)
-
-@app.post("/webhook/shopify")
+@app.route("/webhook/shopify", methods=["POST"])
 def webhook_shopify():
     """
-    Espera un JSON de Shopify Customer Create/Update.
-    Lee metacampos, hace upsert en Brevo y notifica a NOTIFY_EMAILS.
+    Espera payload de cliente Shopify (ej: customers/create o update).
+    Upsert en Brevo y notifica a NOTIFY_EMAILS.
     """
-    raw = request.data.decode("utf-8", errors="ignore")
-    log.info("📩 Shopify webhook RAW: %s", raw[:2000])
+    try:
+        raw = request.data.decode("utf-8", errors="ignore")
+        log.info("📩 Shopify RAW: %s", raw[:1500])
+        data = request.get_json(silent=True) or {}
+        log.info("Shopify JSON: %s", json.dumps(data)[:1500])
 
-    data = request.get_json(silent=True)
-    if not data:
-        return jsonify({"error": "JSON inválido"}), 400
+        customer_id = data.get("id")
+        email = data.get("email")
+        first_name = data.get("first_name", "")
+        last_name  = data.get("last_name", "")
+        phone      = data.get("phone", "")
 
-    email = data.get("email")
-    customer_id = data.get("id")
-    first_name = data.get("first_name", "") or ""
-    last_name = data.get("last_name", "") or ""
-    phone = data.get("phone", "") or ""
+        if not email or not customer_id:
+            return jsonify({"ok": False, "error": "Falta email o id de cliente"}), 400
 
-    if not email or not customer_id:
-        return jsonify({"error": "Falta email o id de cliente"}), 400
+        # Metacampos
+        modelo, precio, descr, plano_url, direccion, presupuesto, persona = get_customer_metafields(customer_id)
 
-    # Metacampos
-    modelo, precio, describe, plano_url, direccion, presupuesto, tipo_pers = get_customer_metafields(customer_id)
-    log.info("Metacampos: modelo=%s precio=%s describe=%s plano=%s dir=%s pres=%s tipo=%s",
-             modelo, precio, describe, plano_url, direccion, presupuesto, tipo_pers)
+        # Upsert Brevo
+        attrs = {
+            "NOMBRE": first_name,
+            "APELLIDOS": last_name,
+            "phone": phone,
+            "MODELO_CABANA": modelo,
+            "PRECIO_CABANA": precio,
+            "DESCRIPCION_CLIENTE": descr,
+            "PLANO_CLIENTE": plano_url,
+            "DIRECCION_CLIENTE": direccion,
+            "PRESUPUESTO_CLIENTE": presupuesto,
+            "TIPO_DE_PERSONA": persona,
+        }
+        sc, body = upsert_brevo_contact(email, attrs)
 
-    # Upsert contacto Brevo
-    attributes = {
-        "NOMBRE": first_name,
-        "APELLIDOS": last_name,
-        "TELEFONO_WHATSAPP": phone,
-        "WHATSAPP": phone,
-        "SMS": phone,
-        "LANDLINE_NUMBER": phone,
-        "MODELO_CABANA": modelo,
-        "PRECIO_CABANA": precio,
-        "DESCRIPCION_CLIENTE": describe,
-        "PLANO_CLIENTE": plano_url,
-        "DIRECCION_CLIENTE": direccion,
-        "PRESUPUESTO_CLIENTE": presupuesto,
-        "TIPO_DE_PERSONA": tipo_pers,
-    }
-    st, body = upsert_brevo_contact(email, attributes)
-    log.info("Upsert Brevo contact status=%s body=%s", st, str(body)[:500])
-
-    # Notificar por correo a NOTIFY_EMAILS (si hay)
-    if NOTIFY_EMAILS:
+        # Notificación por correo a múltiples destinatarios
+        notify_to = split_emails(NOTIFY_EMAILS)
+        subject = f"Nuevo/Actualizado cliente Shopify: {email}"
         html = f"""
-        <h3>Nuevo/Actualizado cliente Shopify</h3>
+        <h3>Cliente Shopify</h3>
         <ul>
           <li><b>Email:</b> {email}</li>
           <li><b>Nombre:</b> {first_name} {last_name}</li>
-          <li><b>Teléfono:</b> {phone}</li>
+          <li><b>Teléfono bruto:</b> {phone}</li>
+          <li><b>Teléfono normalizado:</b> {normalize_phone_cl(phone) or "(no válido)"}</li>
           <li><b>Modelo:</b> {modelo}</li>
           <li><b>Precio:</b> {precio}</li>
-          <li><b>Descripción:</b> {describe}</li>
-          <li><b>Plano:</b> {plano_url}</li>
+          <li><b>Descripción:</b> {descr}</li>
+          <li><b>Plano URL:</b> {plano_url}</li>
           <li><b>Dirección:</b> {direccion}</li>
           <li><b>Presupuesto:</b> {presupuesto}</li>
-          <li><b>Tipo de persona:</b> {tipo_pers}</li>
+          <li><b>Tipo de persona:</b> {persona}</li>
         </ul>
+        <p>Status Brevo upsert: <code>{sc}</code></p>
         """
-        send_brevo_email(
-            to_emails=NOTIFY_EMAILS,
-            subject="🔔 Shopify → Brevo: Cliente actualizado/creado",
-            html=html,
-            tags=["shopify-webhook", "render"],
-            sender_name="Leads",
-            sender_email=BREVO_SENDER,
-        )
+        # Enviar solo si hay destinatarios configurados
+        if notify_to:
+            send_brevo_email(notify_to, subject=subject, html=html, tags=["shopify-webhook"])
 
-    code = 200 if 200 <= st < 300 else 202  # no romper el webhook si Brevo falla
-    return jsonify({"ok": True, "brevo_status": st, "brevo_body": body}), code
+        # Devolvemos 202 para no bloquear reintentos de Shopify y adjuntamos el resultado de Brevo
+        return jsonify({"ok": True, "brevo_status": sc, "brevo_body": body}), 202
 
-@app.post("/webhook/brevo-events")
-def webhook_brevo_events():
-    """
-    Webhook de Brevo (eventos de email). Solo loguea y devuelve 200.
-    Configúralo en Brevo → 'New webhooks' → Events.
-    """
-    data = request.get_json(silent=True)
-    log.info("📩 Brevo webhook event: %s", json.dumps(data, ensure_ascii=False)[:2000])
-    return jsonify({"ok": True}), 200
+    except Exception as e:
+        log.error("❌ ERROR webhook_shopify: %s", e, exc_info=True)
+        return jsonify({"ok": False, "error": "Error interno"}), 500
 
-# -----------------------------------------------------------------------------
-# Main (para desarrollo local; en Render corre con gunicorn)
-# -----------------------------------------------------------------------------
+# ====== Main ======
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "5000"))
+    port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port)
