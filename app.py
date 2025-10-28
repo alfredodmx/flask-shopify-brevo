@@ -1,219 +1,181 @@
 from flask import Flask, request, jsonify
 import requests
-import json
 import os
+import logging
+import hmac
+import hashlib
+from functools import wraps
+from collections import defaultdict
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+
+# 📝 Logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# 🔑 Obtener API Key de Brevo y Shopify desde variables de entorno
+# 📊 Métricas simples (reiniciadas en cada deploy)
+metrics = defaultdict(int)
+
+# 🚦 Rate limiting: máximo 20 webhooks por minuto por IP
+limiter = Limiter(
+    app,
+    key_func=get_remote_address,
+    default_limits=["200 per hour"],  # Límite global suave
+    storage_uri="memory://"  # Usa memoria (suficiente para una sola instancia en Render)
+)
+
+# 🔑 Variables de entorno
 BREVO_API_KEY = os.getenv("BREVO_API_KEY")
 SHOPIFY_ACCESS_TOKEN = os.getenv("SHOPIFY_ACCESS_TOKEN")
-SHOPIFY_STORE = "uaua8v-s7.myshopify.com"  # Reemplaza con tu dominio real de Shopify
+SHOPIFY_WEBHOOK_SECRET = os.getenv("SHOPIFY_WEBHOOK_SECRET")
+SHOPIFY_STORE = os.getenv("SHOPIFY_STORE", "uaua8v-s7.myshopify.com")
 
-if not BREVO_API_KEY or not SHOPIFY_ACCESS_TOKEN:
-    print("❌ ERROR: Las API Keys no están configuradas. Asegúrate de definir 'BREVO_API_KEY' y 'SHOPIFY_ACCESS_TOKEN'.")
-    exit(1)
+required_vars = {
+    "BREVO_API_KEY": BREVO_API_KEY,
+    "SHOPIFY_ACCESS_TOKEN": SHOPIFY_ACCESS_TOKEN,
+    "SHOPIFY_WEBHOOK_SECRET": SHOPIFY_WEBHOOK_SECRET,
+}
+missing = [k for k, v in required_vars.items() if not v]
+if missing:
+    logger.error(f"❌ Faltan variables: {', '.join(missing)}")
+    raise EnvironmentError("Variables críticas faltantes.")
 
-# Endpoint de la API de Brevo para agregar un nuevo contacto
+# URLs
 BREVO_API_URL = "https://api.sendinblue.com/v3/contacts"
-BREVO_GET_CONTACT_API_URL = "https://api.sendinblue.com/v3/contacts/{email}"
-
-# Endpoint de la API GraphQL de Shopify
+BREVO_CONTACT_URL = "https://api.sendinblue.com/v3/contacts/{email}"
 SHOPIFY_GRAPHQL_URL = f"https://{SHOPIFY_STORE}/admin/api/2023-10/graphql.json"
+SHOPIFY_METAFIELDS_URL = f"https://{SHOPIFY_STORE}/admin/api/2023-10/customers/{{customer_id}}/metafields.json"
 
-# 📌 Función para obtener la URL pública de un archivo (intenta con MediaImage y luego GenericFile)
+session = requests.Session()
+session.headers.update({"Content-Type": "application/json"})
+
+
+# 🔒 Validación de webhook
+def verify_shopify_webhook(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        metrics["webhooks_received"] += 1
+        signature = request.headers.get('X-Shopify-Hmac-Sha256')
+        if not signature:
+            metrics["webhooks_invalid_signature"] += 1
+            logger.warning("⚠️ Webhook sin firma HMAC.")
+            return jsonify({"error": "Firma HMAC faltante"}), 401
+
+        body = request.get_data()
+        expected_signature = hmac.new(
+            SHOPIFY_WEBHOOK_SECRET.encode('utf-8'),
+            body,
+            hashlib.sha256
+        ).hexdigest()
+
+        if not hmac.compare_digest(signature, expected_signature):
+            metrics["webhooks_invalid_signature"] += 1
+            logger.warning("🚨 Firma HMAC inválida.")
+            return jsonify({"error": "Firma HMAC inválida"}), 401
+
+        metrics["webhooks_valid"] += 1
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+# --- [Incluye aquí tus funciones get_public_file_url y get_customer_metafields] ---
+# (Mantén las versiones completas de la versión anterior)
+
 def get_public_file_url(gid):
-    if not gid:
-        return None
-    headers = {
-        "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
-        "Content-Type": "application/json"
-    }
+    # ... (tu implementación anterior)
+    pass
 
-    # Intenta primero como MediaImage
-    query_image = {
-        "query": f"""
-            query {{
-              node(id: "{gid}") {{
-                ... on MediaImage {{
-                  image {{
-                    url
-                  }}
-                }}
-              }}
-            }}
-        """
-    }
-    try:
-        response_image = requests.post(SHOPIFY_GRAPHQL_URL, headers=headers, json=query_image, verify=False)
-        response_image.raise_for_status()
-        data_image = response_image.json()
-        if data_image and data_image.get("data") and data_image["data"].get("node") and data_image["data"]["node"].get("image") and data_image["data"]["node"]["image"].get("url"):
-            return data_image["data"]["node"]["image"]["url"]
-    except requests.exceptions.RequestException as e:
-        print(f"⚠️ Error al consultar como MediaImage para GID {gid}: {e}")
-
-    # Si no se encontró como MediaImage, intenta como GenericFile
-    query_file = {
-        "query": f"""
-            query {{
-              node(id: "{gid}") {{
-                ... on GenericFile {{
-                  url
-                }}
-              }}
-            }}
-        """
-    }
-    try:
-        response_file = requests.post(SHOPIFY_GRAPHQL_URL, headers=headers, json=query_file, verify=False)
-        response_file.raise_for_status()
-        data_file = response_file.json()
-        if data_file and data_file.get("data") and data_file["data"].get("node") and data_file["data"]["node"].get("url"):
-            return data_file["data"]["node"]["url"]
-        else:
-            print(f"⚠️ No se encontró URL pública como GenericFile para GID {gid}. Respuesta: {data_file}")
-            return None
-    except requests.exceptions.RequestException as e:
-        print(f"⚠️ Error al consultar como GenericFile para GID {gid}: {e}")
-        return None
-
-    return None
-
-# 📌 Función para obtener los metacampos de un cliente en Shopify
 def get_customer_metafields(customer_id):
-    shopify_url = f"https://{SHOPIFY_STORE}/admin/api/2023-10/customers/{customer_id}/metafields.json"
-    headers = {
-        "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
-        "Content-Type": "application/json"
-    }
-    try:
-        response = requests.get(shopify_url, headers=headers, verify=False)
-        response.raise_for_status()
-        metafields = response.json().get("metafields", [])
-        modelo = next((m["value"] for m in metafields if m["key"] == "modelo"), "Sin modelo")
-        precio = next((m["value"] for m in metafields if m["key"] == "precio"), "Sin precio")
-        describe_lo_que_quieres = next((m["value"] for m in metafields if m["key"] == "describe_lo_que_quieres"), "Sin descripción")
-        tengo_un_plano_gid = next((m["value"] for m in metafields if m["key"] == "tengo_un_plano"), None)
-        tu_direccin_actual = next((m["value"] for m in metafields if m["key"] == "tu_direccin_actual"), "Sin dirección")
-        indica_tu_presupuesto = next((m["value"] for m in metafields if m["key"] == "indica_tu_presupuesto"), "Sin presupuesto")
-        tipo_de_persona = next((m["value"] for m in metafields if m["key"] == "tipo_de_persona"), "Sin persona")
+    # ... (tu implementación anterior)
+    pass
 
-        # Obtener la URL pública del plano si el GID existe
-        tengo_un_plano_url = get_public_file_url(tengo_un_plano_gid) if tengo_un_plano_gid else "Sin plano"
 
-        return modelo, precio, describe_lo_que_quieres, tengo_un_plano_url, tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona
-    except requests.exceptions.RequestException as e:
-        print("❌ Error obteniendo metacampos de Shopify:", e)
-        return "Error", "Error", "Error", "Error", "Error", "Error", "Error"
-
-# 📩 Ruta del webhook que Shopify enviará a esta API
+# 📩 Webhook protegido + con rate limiting
 @app.route('/webhook/shopify', methods=['POST'])
+@limiter.limit("20 per minute")  # Límite estricto por endpoint
+@verify_shopify_webhook
 def receive_webhook():
     try:
-        raw_data = request.data.decode('utf-8')  # Capturar datos crudos del webhook
-        print("📩 Webhook recibido (RAW):", raw_data)
+        data = request.get_json()
+        if not 
+            return jsonify({"error": "JSON inválido"}), 400
 
-        # Intentar parsear JSON
-        data = request.get_json(silent=True)
-
-        if not data:
-            print("❌ ERROR: No se pudo interpretar el JSON correctamente.")
-            return jsonify({"error": "Webhook sin JSON válido"}), 400
-
-        print("📩 Webhook recibido de Shopify (JSON):", json.dumps(data, indent=4))
-
-        # Extraer información básica
-        customer_id = data.get("id")  # Obtener el ID del cliente para buscar metacampos
         email = data.get("email")
-        first_name = data.get("first_name", "")
-        last_name = data.get("last_name", "")
-        phone = data.get("phone", "")
-
+        customer_id = data.get("id")
         if not email or not customer_id:
-            print("❌ ERROR: No se recibió un email o ID de cliente válido.")
-            return jsonify({"error": "Falta email o ID de cliente"}), 400
+            return jsonify({"error": "Faltan campos"}), 400
 
-        # 🔍 Obtener los metacampos desde Shopify
-        modelo, precio, describe_lo_que_quieres, tengo_un_plano, tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona = get_customer_metafields(customer_id)
+        modelo, precio, desc, plano, direccion, presupuesto, tipo_persona = get_customer_metafields(customer_id)
 
-        # Verificar que los metacampos no estén vacíos
-        print("Valores de metacampos:", modelo, precio, describe_lo_que_quieres, tengo_un_plano, tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona)
-
-        # 📌 Verificar si el contacto ya existe en Brevo
-        headers = {
-            "api-key": BREVO_API_KEY,
-            "Content-Type": "application/json"
+        contact_data = {
+            "email": email,
+            "attributes": {
+                "NOMBRE": data.get("first_name", ""),
+                "APELLIDOS": data.get("last_name", ""),
+                "TELEFONO_WHATSAPP": data.get("phone", ""),
+                "WHATSAPP": data.get("phone", ""),
+                "SMS": data.get("phone", ""),
+                "LANDLINE_NUMBER": data.get("phone", ""),
+                "MODELO_CABANA": modelo,
+                "PRECIO_CABANA": precio,
+                "DESCRIPCION_CLIENTE": desc,
+                "PLANO_CLIENTE": plano,
+                "DIRECCION_CLIENTE": direccion,
+                "PRESUPUESTO_CLIENTE": presupuesto,
+                "TIPO_DE_PERSONA": tipo_persona
+            }
         }
 
-        response = requests.get(BREVO_GET_CONTACT_API_URL.format(email=email), headers=headers)
+        brevo_headers = {"api-key": BREVO_API_KEY}
+        contact_url = BREVO_CONTACT_URL.format(email=email)
 
-        if response.status_code == 200:
-            # Si el contacto ya existe, podemos optar por actualizarlo
-            print(f"⚠️ El contacto con el correo {email} ya existe en Brevo. Se actualizará.")
-            contact_data = {
-                "email": email,
-                "attributes": {
-                    "NOMBRE": first_name,
-                    "APELLIDOS": last_name,
-                    "TELEFONO_WHATSAPP": phone,
-                    "WHATSAPP": phone,
-                    "SMS": phone,
-                    "LANDLINE_NUMBER": phone,
-                    "MODELO_CABANA": modelo,
-                    "PRECIO_CABANA": precio,
-                    "DESCRIPCION_CLIENTE": describe_lo_que_quieres,
-                    "PLANO_CLIENTE": tengo_un_plano,  # Ahora debería ser la URL pública de cualquier archivo
-                    "DIRECCION_CLIENTE": tu_direccin_actual,
-                    "PRESUPUESTO_CLIENTE": indica_tu_presupuesto,
-                    "TIPO_DE_PERSONA": tipo_de_persona
-                }
-            }
+        check_resp = session.get(contact_url, headers=brevo_headers)
 
-            # Actualizamos los datos del contacto existente
-            update_response = requests.put(BREVO_GET_CONTACT_API_URL.format(email=email), json=contact_data, headers=headers)
+        if check_resp.status_code == 200:
+            resp = session.put(contact_url, json=contact_data, headers=brevo_headers)
+            if resp.status_code == 200:
+                metrics["contacts_updated"] += 1
+                logger.info(f"🔄 Actualizado: {email}")
+                return jsonify({"message": "Actualizado"}), 200
+        elif check_resp.status_code == 404:
+            resp = session.post(BREVO_API_URL, json=contact_data, headers=brevo_headers)
+            if resp.status_code == 201:
+                metrics["contacts_created"] += 1
+                logger.info(f"🆕 Creado: {email}")
+                return jsonify({"message": "Creado"}), 201
 
-            if update_response.status_code == 200:
-                return jsonify({"message": "Contacto actualizado en Brevo"}), 200
-            else:
-                return jsonify({"error": "No se pudo actualizar el contacto en Brevo", "details": update_response.text}), 400
-        elif response.status_code == 404:
-            # Si el contacto no existe, creamos uno nuevo
-            print(f"✅ El contacto con el correo {email} no existe. Se creará uno nuevo.")
-            contact_data = {
-                "email": email,
-                "attributes": {
-                    "NOMBRE": first_name,
-                    "APELLIDOS": last_name,
-                    "TELEFONO_WHATSAPP": phone,
-                    "WHATSAPP": phone,
-                    "SMS": phone,
-                    "LANDLINE_NUMBER": phone,
-                    "MODELO_CABANA": modelo,
-                    "PRECIO_CABANA": precio,
-                    "DESCRIPCION_CLIENTE": describe_lo_que_quieres,
-                    "PLANO_CLIENTE": tengo_un_plano,  # Ahora debería ser la URL pública de cualquier archivo
-                    "DIRECCION_CLIENTE": tu_direccin_actual,
-                    "PRESUPUESTO_CLIENTE": indica_tu_presupuesto,
-                    "TIPO_DE_PERSONA": tipo_de_persona
-                }
-            }
-
-            # 🚀 Enviar los datos a Brevo para crear el nuevo contacto
-            create_response = requests.post(BREVO_API_URL, json=contact_data, headers=headers)
-
-            if create_response.status_code == 201:  # El código de creación exitosa suele ser 201
-                return jsonify({"message": "Contacto creado en Brevo con metacampos"}), 201
-            else:
-                return jsonify({"error": "No se pudo crear el contacto en Brevo", "details": create_response.text}), 400
-        else:
-            return jsonify({"error": "Error al verificar si el contacto existe", "details": response.text}), 400
+        metrics["brevo_errors"] += 1
+        final_resp = resp if 'resp' in locals() else check_resp
+        return jsonify({"error": "Brevo error", "status": final_resp.status_code}), 400
 
     except Exception as e:
-        print("❌ ERROR procesando el webhook:", str(e))
+        metrics["internal_errors"] += 1
+        logger.exception("💥 Error interno")
         return jsonify({"error": "Error interno"}), 500
 
-# 🔥 Iniciar el servidor en Render
+
+# 🩺 Health check
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({
+        "status": "healthy",
+        "service": "shopify-brevo-sync",
+        "metrics": dict(metrics)  # 👈 ¡Expone métricas aquí!
+    }), 200
+
+
+# 📈 Endpoint solo para métricas (opcional)
+@app.route('/metrics', methods=['GET'])
+def metrics_endpoint():
+    return jsonify(dict(metrics)), 200
+
+
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
