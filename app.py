@@ -9,7 +9,7 @@ from collections import defaultdict
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 
-# 📝 Configuración de logging
+# 📝 Logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -22,13 +22,13 @@ app = Flask(__name__)
 # 📊 Métricas simples
 metrics = defaultdict(int)
 
-# 🚦 Rate limiting
+# 🚦 Rate limiting (compatible con flask-limiter >= 3.0)
 limiter = Limiter(
-    app,
     key_func=get_remote_address,
     default_limits=["200 per hour"],
     storage_uri="memory://"
 )
+limiter.init_app(app)  # ← Vincular después de crear la app
 
 # 🔑 Variables de entorno
 BREVO_API_KEY = os.getenv("BREVO_API_KEY")
@@ -47,7 +47,7 @@ if missing:
     logger.error(f"❌ Faltan variables de entorno: {', '.join(missing)}")
     raise EnvironmentError("Variables críticas faltantes.")
 
-# ✅ URLs corregidas (sin espacios)
+# ✅ URLs corregidas
 BREVO_API_URL = "https://api.sendinblue.com/v3/contacts"
 BREVO_CONTACT_URL = "https://api.sendinblue.com/v3/contacts/{email}"
 SHOPIFY_GRAPHQL_URL = f"https://{SHOPIFY_STORE}/admin/api/2023-10/graphql.json"
@@ -58,7 +58,7 @@ session = requests.Session()
 session.headers.update({"Content-Type": "application/json"})
 
 
-# 🔒 Decorador para validar firma del webhook de Shopify
+# 🔒 Validación de firma de webhook de Shopify
 def verify_shopify_webhook(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -66,7 +66,7 @@ def verify_shopify_webhook(f):
         signature = request.headers.get('X-Shopify-Hmac-Sha256')
         if not signature:
             metrics["webhooks_invalid_signature"] += 1
-            logger.warning("⚠️ Webhook recibido sin firma HMAC.")
+            logger.warning("⚠️ Webhook sin firma HMAC.")
             return jsonify({"error": "Firma HMAC faltante"}), 401
 
         body = request.get_data()
@@ -78,7 +78,7 @@ def verify_shopify_webhook(f):
 
         if not hmac.compare_digest(signature, expected_signature):
             metrics["webhooks_invalid_signature"] += 1
-            logger.warning("🚨 Firma HMAC inválida. Posible ataque.")
+            logger.warning("🚨 Firma HMAC inválida.")
             return jsonify({"error": "Firma HMAC inválida"}), 401
 
         metrics["webhooks_valid"] += 1
@@ -86,7 +86,7 @@ def verify_shopify_webhook(f):
     return decorated_function
 
 
-# 📌 Obtener URL pública de un archivo en Shopify
+# 📌 Obtener URL pública de un archivo (MediaImage o GenericFile)
 def get_public_file_url(gid):
     if not gid:
         return "Sin plano"
@@ -181,7 +181,7 @@ def get_customer_metafields(customer_id):
 def receive_webhook():
     try:
         data = request.get_json()
-        if not data:  # ✅ CORREGIDO: esta era la línea 106 con error de sintaxis
+        if not data:  # ✅ Corregido: condición completa
             logger.warning("Webhook sin JSON válido.")
             return jsonify({"error": "JSON inválido"}), 400
 
@@ -217,25 +217,21 @@ def receive_webhook():
         brevo_headers = {"api-key": BREVO_API_KEY}
         contact_url = BREVO_CONTACT_URL.format(email=email)
 
-        # Verificar si el contacto existe
         check_resp = session.get(contact_url, headers=brevo_headers)
 
         if check_resp.status_code == 200:
-            # Actualizar
             resp = session.put(contact_url, json=contact_data, headers=brevo_headers)
             if resp.status_code == 200:
                 metrics["contacts_updated"] += 1
                 logger.info(f"🔄 Contacto actualizado: {email}")
                 return jsonify({"message": "Contacto actualizado en Brevo"}), 200
         elif check_resp.status_code == 404:
-            # Crear
             resp = session.post(BREVO_API_URL, json=contact_data, headers=brevo_headers)
             if resp.status_code == 201:
                 metrics["contacts_created"] += 1
                 logger.info(f"🆕 Contacto creado: {email}")
                 return jsonify({"message": "Contacto creado en Brevo"}), 201
 
-        # Error en Brevo
         metrics["brevo_errors"] += 1
         final_resp = resp if 'resp' in locals() else check_resp
         logger.error(f"❌ Error en Brevo ({email}): {final_resp.status_code}")
