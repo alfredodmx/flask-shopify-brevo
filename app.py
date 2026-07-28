@@ -27,7 +27,6 @@ BREVO_GET_CONTACT_API_URL = "https://api.sendinblue.com/v3/contacts/{email}"
 # Endpoint de la API GraphQL de Shopify
 SHOPIFY_GRAPHQL_URL = f"https://{SHOPIFY_STORE}/admin/api/2023-10/graphql.json"
 
-
 # 📌 Función para obtener la URL pública de un archivo (intenta con MediaImage y luego GenericFile)
 def get_public_file_url(gid):
     if not gid:
@@ -87,7 +86,6 @@ def get_public_file_url(gid):
 
     return None
 
-
 # 📌 Función para obtener los metacampos de un cliente en Shopify
 def get_customer_metafields(customer_id):
     shopify_url = f"https://{SHOPIFY_STORE}/admin/api/2023-10/customers/{customer_id}/metafields.json"
@@ -115,15 +113,15 @@ def get_customer_metafields(customer_id):
         print("❌ Error obteniendo metacampos de Shopify:", e)
         return "Error", "Error", "Error", "Error", "Error", "Error", "Error"
 
-
 # ============================================================================
 # NUEVO: escribe el lead también en el CRM (Supabase). Aditivo, no toca Brevo.
-# best-effort: si algo falla, NO rompe el webhook.
+# best-effort: si algo falla, NO rompe el webhook. Loguea el error exacto.
 # ============================================================================
 def enviar_a_crm(email, first_name, last_name, phone,
                  modelo, precio, describe, plano_url, direccion,
                  presupuesto, tipo_persona):
     if not (SUPABASE_URL and SUPABASE_SERVICE_KEY and email):
+        print("⚠️ CRM: faltan SUPABASE_URL / SUPABASE_SERVICE_KEY o email; se omite el CRM.")
         return
     hdr = {
         "apikey": SUPABASE_SERVICE_KEY,
@@ -160,21 +158,29 @@ def enviar_a_crm(email, first_name, last_name, phone,
     try:
         r = requests.get(f"{SUPABASE_URL}/rest/v1/clientes", headers=hdr,
                          params={"email": f"eq.{email}", "select": "id", "limit": 1}, timeout=15)
-        rows = r.json() if r.ok else []
+        if not r.ok:
+            print(f"⚠️ CRM: la búsqueda del lead falló ({r.status_code}): {r.text[:200]}")
+            return
+        rows = r.json() or []
         if rows:  # ya existe → actualiza sus datos (no toca su etapa ni su baja)
-            requests.patch(f"{SUPABASE_URL}/rest/v1/clientes",
-                           headers={**hdr, "Prefer": "return=minimal"},
-                           params={"id": f"eq.{rows[0]['id']}"}, json=base, timeout=15)
-            print(f"✅ CRM: lead {email} actualizado")
+            resp = requests.patch(f"{SUPABASE_URL}/rest/v1/clientes",
+                                  headers={**hdr, "Prefer": "return=minimal"},
+                                  params={"id": f"eq.{rows[0]['id']}"}, json=base, timeout=15)
+            if resp.ok:
+                print(f"✅ CRM: lead {email} actualizado")
+            else:
+                print(f"⚠️ CRM: no se pudo actualizar ({resp.status_code}): {resp.text[:200]}")
         else:    # nuevo → cae en la Bandeja como lead
             base.update(id=str(uuid.uuid4()), activo=True,
                         etapa_manual="lead_nuevo", fecha_creacion=now)
-            requests.post(f"{SUPABASE_URL}/rest/v1/clientes",
-                          headers={**hdr, "Prefer": "return=minimal"}, json=base, timeout=15)
-            print(f"✅ CRM: lead {email} creado")
+            resp = requests.post(f"{SUPABASE_URL}/rest/v1/clientes",
+                                 headers={**hdr, "Prefer": "return=minimal"}, json=base, timeout=15)
+            if resp.ok:
+                print(f"✅ CRM: lead {email} creado")
+            else:
+                print(f"⚠️ CRM: no se pudo crear ({resp.status_code}): {resp.text[:200]}")
     except Exception as e:
         print("⚠️ CRM upsert error:", e)
-
 
 # 📩 Ruta del webhook que Shopify enviará a esta API
 @app.route('/webhook/shopify', methods=['POST'])
@@ -286,7 +292,6 @@ def receive_webhook():
     except Exception as e:
         print("❌ ERROR procesando el webhook:", str(e))
         return jsonify({"error": "Error interno"}), 500
-
 
 # 🔥 Iniciar el servidor en Render
 if __name__ == '__main__':
