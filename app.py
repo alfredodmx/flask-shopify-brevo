@@ -2,6 +2,8 @@ from flask import Flask, request, jsonify
 import requests
 import json
 import os
+import uuid                                               # NUEVO (para el CRM)
+from datetime import datetime, timezone, timedelta        # NUEVO (para el CRM)
 
 app = Flask(__name__)
 
@@ -9,6 +11,10 @@ app = Flask(__name__)
 BREVO_API_KEY = os.getenv("BREVO_API_KEY")
 SHOPIFY_ACCESS_TOKEN = os.getenv("SHOPIFY_ACCESS_TOKEN")
 SHOPIFY_STORE = "uaua8v-s7.myshopify.com"  # Reemplaza con tu dominio real de Shopify
+
+# NUEVO: credenciales del CRM (Supabase) — las agregas en Render (Environment)
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 
 if not BREVO_API_KEY or not SHOPIFY_ACCESS_TOKEN:
     print("❌ ERROR: Las API Keys no están configuradas. Asegúrate de definir 'BREVO_API_KEY' y 'SHOPIFY_ACCESS_TOKEN'.")
@@ -20,6 +26,7 @@ BREVO_GET_CONTACT_API_URL = "https://api.sendinblue.com/v3/contacts/{email}"
 
 # Endpoint de la API GraphQL de Shopify
 SHOPIFY_GRAPHQL_URL = f"https://{SHOPIFY_STORE}/admin/api/2023-10/graphql.json"
+
 
 # 📌 Función para obtener la URL pública de un archivo (intenta con MediaImage y luego GenericFile)
 def get_public_file_url(gid):
@@ -80,6 +87,7 @@ def get_public_file_url(gid):
 
     return None
 
+
 # 📌 Función para obtener los metacampos de un cliente en Shopify
 def get_customer_metafields(customer_id):
     shopify_url = f"https://{SHOPIFY_STORE}/admin/api/2023-10/customers/{customer_id}/metafields.json"
@@ -106,6 +114,67 @@ def get_customer_metafields(customer_id):
     except requests.exceptions.RequestException as e:
         print("❌ Error obteniendo metacampos de Shopify:", e)
         return "Error", "Error", "Error", "Error", "Error", "Error", "Error"
+
+
+# ============================================================================
+# NUEVO: escribe el lead también en el CRM (Supabase). Aditivo, no toca Brevo.
+# best-effort: si algo falla, NO rompe el webhook.
+# ============================================================================
+def enviar_a_crm(email, first_name, last_name, phone,
+                 modelo, precio, describe, plano_url, direccion,
+                 presupuesto, tipo_persona):
+    if not (SUPABASE_URL and SUPABASE_SERVICE_KEY and email):
+        return
+    hdr = {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "Content-Type": "application/json",
+    }
+    now = datetime.now(timezone(timedelta(hours=-3))).isoformat()
+    nombre = (f"{first_name or ''} {last_name or ''}").strip() or email
+    tp = (tipo_persona or "").lower()
+    tipo = "empresa" if ("empresa" in tp or "jur" in tp) else "natural"
+
+    def _limpio(v):
+        v = str(v or "").strip()
+        return "" if v.lower().startswith(("sin ", "error")) else v
+
+    meta = {
+        "modelo": _limpio(modelo),
+        "precio": _limpio(precio),
+        "descripcion": _limpio(describe),
+        "presupuesto": _limpio(presupuesto),
+        "tipo_persona": _limpio(tipo_persona),
+        "plano_url": plano_url if (plano_url and str(plano_url).startswith("http")) else "",
+    }
+    base = {
+        "nombre": nombre,
+        "email": email,
+        "telefono": phone or "",
+        "direccion": _limpio(direccion),
+        "tipo": tipo,
+        "origen": "Shopify",
+        "shopify_meta": meta,
+        "fecha_modificacion": now,
+    }
+    try:
+        r = requests.get(f"{SUPABASE_URL}/rest/v1/clientes", headers=hdr,
+                         params={"email": f"eq.{email}", "select": "id", "limit": 1}, timeout=15)
+        rows = r.json() if r.ok else []
+        if rows:  # ya existe → actualiza sus datos (no toca su etapa ni su baja)
+            requests.patch(f"{SUPABASE_URL}/rest/v1/clientes",
+                           headers={**hdr, "Prefer": "return=minimal"},
+                           params={"id": f"eq.{rows[0]['id']}"}, json=base, timeout=15)
+            print(f"✅ CRM: lead {email} actualizado")
+        else:    # nuevo → cae en la Bandeja como lead
+            base.update(id=str(uuid.uuid4()), activo=True,
+                        etapa_manual="lead_nuevo", fecha_creacion=now)
+            requests.post(f"{SUPABASE_URL}/rest/v1/clientes",
+                          headers={**hdr, "Prefer": "return=minimal"}, json=base, timeout=15)
+            print(f"✅ CRM: lead {email} creado")
+    except Exception as e:
+        print("⚠️ CRM upsert error:", e)
+
 
 # 📩 Ruta del webhook que Shopify enviará a esta API
 @app.route('/webhook/shopify', methods=['POST'])
@@ -136,6 +205,11 @@ def receive_webhook():
 
         # 🔍 Obtener los metacampos desde Shopify
         modelo, precio, describe_lo_que_quieres, tengo_un_plano, tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona = get_customer_metafields(customer_id)
+
+        # NUEVO: además de Brevo, mandar el lead al CRM (Supabase) en tiempo real
+        enviar_a_crm(email, first_name, last_name, phone,
+                     modelo, precio, describe_lo_que_quieres, tengo_un_plano,
+                     tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona)
 
         # Verificar que los metacampos no estén vacíos
         print("Valores de metacampos:", modelo, precio, describe_lo_que_quieres, tengo_un_plano, tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona)
@@ -212,6 +286,7 @@ def receive_webhook():
     except Exception as e:
         print("❌ ERROR procesando el webhook:", str(e))
         return jsonify({"error": "Error interno"}), 500
+
 
 # 🔥 Iniciar el servidor en Render
 if __name__ == '__main__':
