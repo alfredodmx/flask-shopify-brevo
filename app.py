@@ -188,44 +188,6 @@ def enviar_a_crm(email, first_name, last_name, phone,
     except Exception as e:
         print("⚠️ CRM upsert error:", e, flush=True)
 
-# 🩺 Endpoint TEMPORAL de diagnóstico del CRM (quítalo cuando ya funcione).
-# Muestra, SIN exponer secretos, el largo/forma real de las variables dentro de
-# Render y la respuesta cruda de Supabase (GET + un insert/delete de prueba).
-@app.route('/crm-diag')
-def crm_diag():
-    u = SUPABASE_URL or ""
-    k = SUPABASE_SERVICE_KEY or ""
-    info = {
-        "url_len": len(u),
-        "url_tail_repr": repr(u[-14:]),          # revela espacios / '/' / \n al final
-        "key_len": len(k),
-        "key_head_repr": repr(k[:12]),
-        "key_tail_repr": repr(k[-4:]),
-        "referencia_correcta": {"url_len": 40, "key_len": 41},
-    }
-    try:
-        h = {"apikey": k, "Authorization": f"Bearer {k}", "Content-Type": "application/json"}
-        rr = requests.get(f"{u}/rest/v1/clientes", headers=h,
-                          params={"select": "id", "limit": 1}, timeout=15)
-        info["GET_status"] = rr.status_code
-        info["GET_body"] = rr.text[:250]
-        if rr.ok:
-            tid = str(uuid.uuid4())
-            payload = {"id": tid, "email": f"diag-{tid[:8]}@espaciotest.local",
-                       "nombre": "DIAG", "origen": "Shopify", "activo": True,
-                       "etapa_manual": "lead_nuevo"}
-            ins = requests.post(f"{u}/rest/v1/clientes",
-                                headers={**h, "Prefer": "return=minimal"}, json=payload, timeout=15)
-            info["INSERT_status"] = ins.status_code
-            info["INSERT_body"] = ins.text[:250]
-            requests.delete(f"{u}/rest/v1/clientes", headers=h,
-                            params={"id": f"eq.{tid}"}, timeout=15)
-            info["cleanup"] = "fila de prueba borrada"
-    except Exception as e:
-        info["EXCEPTION"] = repr(e)
-    return jsonify(info)
-
-
 # 📩 Ruta del webhook que Shopify enviará a esta API
 @app.route('/webhook/shopify', methods=['POST'])
 def receive_webhook():
