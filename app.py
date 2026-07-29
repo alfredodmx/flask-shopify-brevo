@@ -16,6 +16,12 @@ SHOPIFY_STORE = "uaua8v-s7.myshopify.com"  # Reemplaza con tu dominio real de Sh
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 
+# Diagnóstico de ARRANQUE: ¿el proceso ve las variables del CRM? (enmascarado)
+print("🔧 CRM config -> SUPABASE_URL: {} | SUPABASE_SERVICE_KEY: {}".format(
+    (SUPABASE_URL[:28] + "…") if SUPABASE_URL else "❌ FALTA",
+    (SUPABASE_SERVICE_KEY[:12] + "…") if SUPABASE_SERVICE_KEY else "❌ FALTA",
+), flush=True)
+
 if not BREVO_API_KEY or not SHOPIFY_ACCESS_TOKEN:
     print("❌ ERROR: Las API Keys no están configuradas. Asegúrate de definir 'BREVO_API_KEY' y 'SHOPIFY_ACCESS_TOKEN'.")
     exit(1)
@@ -121,7 +127,7 @@ def enviar_a_crm(email, first_name, last_name, phone,
                  modelo, precio, describe, plano_url, direccion,
                  presupuesto, tipo_persona):
     if not (SUPABASE_URL and SUPABASE_SERVICE_KEY and email):
-        print("⚠️ CRM: faltan SUPABASE_URL / SUPABASE_SERVICE_KEY o email; se omite el CRM.")
+        print("⚠️ CRM: faltan SUPABASE_URL / SUPABASE_SERVICE_KEY o email; se omite el CRM.", flush=True)
         return
     hdr = {
         "apikey": SUPABASE_SERVICE_KEY,
@@ -159,7 +165,7 @@ def enviar_a_crm(email, first_name, last_name, phone,
         r = requests.get(f"{SUPABASE_URL}/rest/v1/clientes", headers=hdr,
                          params={"email": f"eq.{email}", "select": "id", "limit": 1}, timeout=15)
         if not r.ok:
-            print(f"⚠️ CRM: la búsqueda del lead falló ({r.status_code}): {r.text[:200]}")
+            print(f"⚠️ CRM: la búsqueda del lead falló ({r.status_code}): {r.text[:200]}", flush=True)
             return
         rows = r.json() or []
         if rows:  # ya existe → actualiza sus datos (no toca su etapa ni su baja)
@@ -167,20 +173,20 @@ def enviar_a_crm(email, first_name, last_name, phone,
                                   headers={**hdr, "Prefer": "return=minimal"},
                                   params={"id": f"eq.{rows[0]['id']}"}, json=base, timeout=15)
             if resp.ok:
-                print(f"✅ CRM: lead {email} actualizado")
+                print(f"✅ CRM: lead {email} actualizado", flush=True)
             else:
-                print(f"⚠️ CRM: no se pudo actualizar ({resp.status_code}): {resp.text[:200]}")
+                print(f"⚠️ CRM: no se pudo actualizar ({resp.status_code}): {resp.text[:200]}", flush=True)
         else:    # nuevo → cae en la Bandeja como lead
             base.update(id=str(uuid.uuid4()), activo=True,
                         etapa_manual="lead_nuevo", fecha_creacion=now)
             resp = requests.post(f"{SUPABASE_URL}/rest/v1/clientes",
                                  headers={**hdr, "Prefer": "return=minimal"}, json=base, timeout=15)
             if resp.ok:
-                print(f"✅ CRM: lead {email} creado")
+                print(f"✅ CRM: lead {email} creado", flush=True)
             else:
-                print(f"⚠️ CRM: no se pudo crear ({resp.status_code}): {resp.text[:200]}")
+                print(f"⚠️ CRM: no se pudo crear ({resp.status_code}): {resp.text[:200]}", flush=True)
     except Exception as e:
-        print("⚠️ CRM upsert error:", e)
+        print("⚠️ CRM upsert error:", e, flush=True)
 
 # 📩 Ruta del webhook que Shopify enviará a esta API
 @app.route('/webhook/shopify', methods=['POST'])
