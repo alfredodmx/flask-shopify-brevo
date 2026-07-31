@@ -16,6 +16,10 @@ SHOPIFY_STORE = "uaua8v-s7.myshopify.com"  # Reemplaza con tu dominio real de Sh
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 
+# Emails ROOT para las notificaciones (opcional, coma-separados). Los admin se
+# detectan solos por su rol; agrega acá los root que NO tengan rol 'admin'.
+CRM_ROOT_EMAILS = os.getenv("CRM_ROOT_EMAILS", "")
+
 # Diagnóstico de ARRANQUE: ¿el proceso ve las variables del CRM? (enmascarado)
 print("🔧 CRM config -> SUPABASE_URL: {} | SUPABASE_SERVICE_KEY: {}".format(
     (SUPABASE_URL[:28] + "…") if SUPABASE_URL else "❌ FALTA",
@@ -120,6 +124,61 @@ def get_customer_metafields(customer_id):
         return "Error", "Error", "Error", "Error", "Error", "Error", "Error"
 
 # ============================================================================
+# NUEVO: notificar a admin/root (campana del CRM) cuando cae un lead de Shopify.
+# ============================================================================
+def _destinatarios_admin():
+    """Emails de admin/root a notificar: rol 'admin'/'root' del directorio de
+    usuarios + CRM_ROOT_EMAILS. best-effort → set() si algo falla."""
+    dests = set()
+    for e in (CRM_ROOT_EMAILS or "").split(","):
+        e = e.strip().lower()
+        if e:
+            dests.add(e)
+    if not (SUPABASE_URL and SUPABASE_SERVICE_KEY):
+        return dests
+    try:
+        hdr = {"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"}
+        r = requests.get(f"{SUPABASE_URL}/auth/v1/admin/users", headers=hdr,
+                         params={"per_page": 1000, "page": 1}, timeout=15)
+        for u in ((r.json() or {}).get("users") or []):
+            meta = u.get("user_metadata") or u.get("raw_user_meta_data") or {}
+            if str(meta.get("rol", "")).strip().lower() in ("admin", "root"):
+                em = (u.get("email") or "").strip().lower()
+                if em:
+                    dests.add(em)
+    except Exception as e:
+        print("⚠️ Notif: no pude leer usuarios:", e, flush=True)
+    return dests
+
+
+def notificar_lead_shopify(nombre, cliente_id):
+    """Crea una notificación (campana del CRM) para cada admin/root ante un lead
+    NUEVO de Shopify. best-effort: nunca rompe el webhook."""
+    dests = _destinatarios_admin()
+    if not (dests and SUPABASE_URL and SUPABASE_SERVICE_KEY):
+        print("⚠️ Notif: sin destinatarios admin/root (¿CRM_ROOT_EMAILS?).", flush=True)
+        return
+    now = datetime.now(timezone(timedelta(hours=-3))).isoformat()
+    filas = [{
+        "id": str(uuid.uuid4()), "user_email": em, "tipo": "lead",
+        "titulo": f"Nuevo lead de Shopify: {nombre}",
+        "detalle": "Cayó en la Bandeja. Revísalo y asígnalo.",
+        "cliente_id": cliente_id, "leido": False, "fecha": now,
+    } for em in dests]
+    try:
+        hdr = {"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+               "Content-Type": "application/json"}
+        resp = requests.post(f"{SUPABASE_URL}/rest/v1/notificaciones",
+                             headers={**hdr, "Prefer": "return=minimal"}, json=filas, timeout=15)
+        if resp.ok:
+            print(f"✅ Notif: avisados {len(filas)} admin/root del lead {nombre}", flush=True)
+        else:
+            print(f"⚠️ Notif: no se pudo guardar ({resp.status_code}): {resp.text[:200]}", flush=True)
+    except Exception as e:
+        print("⚠️ Notif insert error:", e, flush=True)
+
+
+# ============================================================================
 # NUEVO: escribe el lead también en el CRM (Supabase). Aditivo, no toca Brevo.
 # best-effort: si algo falla, NO rompe el webhook. Loguea el error exacto.
 # ============================================================================
@@ -183,6 +242,7 @@ def enviar_a_crm(email, first_name, last_name, phone,
                                  headers={**hdr, "Prefer": "return=minimal"}, json=base, timeout=15)
             if resp.ok:
                 print(f"✅ CRM: lead {email} creado", flush=True)
+                notificar_lead_shopify(nombre, base["id"])   # avisa a admin/root
             else:
                 print(f"⚠️ CRM: no se pudo crear ({resp.status_code}): {resp.text[:200]}", flush=True)
     except Exception as e:
@@ -298,6 +358,52 @@ def receive_webhook():
     except Exception as e:
         print("❌ ERROR procesando el webhook:", str(e))
         return jsonify({"error": "Error interno"}), 500
+
+# 📊 Webhook de RESEND: guarda en el CRM (Supabase `crm_correos`) el estado de cada
+# correo (entregado / abierto / click / rebote / spam) EN TIEMPO REAL. Aditivo y
+# best-effort: si algo falla responde 200 igual (no queremos reintentos en loop).
+# Actualiza la fila cuyo `resend_id` = el email_id del evento. Los flags son
+# 'sticky' (una vez true quedan true) → robustos ante eventos fuera de orden.
+@app.route('/webhook/resend', methods=['POST'])
+def receive_resend_webhook():
+    try:
+        data = request.get_json(silent=True) or {}
+        etype = str(data.get("type") or "")            # ej: email.delivered, email.opened
+        info = data.get("data") or {}
+        email_id = info.get("email_id") or info.get("id") or ""
+        if not etype.startswith("email.") or not email_id:
+            return jsonify({"ok": True, "ignorado": True}), 200
+        ev = etype.split(".", 1)[1]                     # delivered/opened/clicked/bounced/complained/...
+        if not (SUPABASE_URL and SUPABASE_SERVICE_KEY):
+            print("⚠️ Resend webhook: faltan credenciales de Supabase.", flush=True)
+            return jsonify({"ok": False}), 200
+        hdr = {
+            "apikey": SUPABASE_SERVICE_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+            "Content-Type": "application/json",
+        }
+        now = datetime.now(timezone(timedelta(hours=-3))).isoformat()
+        patch = {"last_event": ev, "last_event_at": data.get("created_at") or now}
+        if ev == "opened":
+            patch["opened"] = True
+        elif ev == "clicked":
+            patch["clicked"] = True
+            patch["opened"] = True                     # un click implica apertura
+        elif ev == "bounced":
+            patch["bounced"] = True
+        elif ev == "complained":
+            patch["complained"] = True
+        r = requests.patch(f"{SUPABASE_URL}/rest/v1/crm_correos",
+                           headers={**hdr, "Prefer": "return=minimal"},
+                           params={"resend_id": f"eq.{email_id}"}, json=patch, timeout=15)
+        if r.ok:
+            print(f"✅ Resend: {ev} -> {email_id}", flush=True)
+        else:
+            print(f"⚠️ Resend: no se pudo guardar ({r.status_code}): {r.text[:200]}", flush=True)
+        return jsonify({"ok": True}), 200
+    except Exception as e:
+        print("⚠️ Resend webhook error:", e, flush=True)
+        return jsonify({"ok": True}), 200
 
 # 🔥 Iniciar el servidor en Render
 if __name__ == '__main__':
