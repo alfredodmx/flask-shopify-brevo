@@ -391,7 +391,20 @@ def receive_resend_webhook():
             patch["opened"] = True                     # un click implica apertura
             _link = ((info.get("click") or {}).get("link") or "").strip()
             if _link:
-                patch["click_url"] = _link             # a qué enlace hizo click el lector
+                patch["click_url"] = _link             # legado: último enlace clickeado
+                # Acumular TODOS los enlaces: lee los actuales y agrega el nuevo sin duplicar.
+                try:
+                    g = requests.get(f"{SUPABASE_URL}/rest/v1/crm_correos", headers=hdr,
+                                     params={"resend_id": f"eq.{email_id}", "select": "click_urls"},
+                                     timeout=15)
+                    cur = g.json()[0].get("click_urls") if (g.ok and g.json()) else []
+                    if not isinstance(cur, list):
+                        cur = []
+                    if _link not in cur:
+                        cur.append(_link)
+                    patch["click_urls"] = cur
+                except Exception:
+                    patch["click_urls"] = [_link]
         elif ev == "bounced":
             patch["bounced"] = True
         elif ev == "complained":
