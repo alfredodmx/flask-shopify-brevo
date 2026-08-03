@@ -389,6 +389,9 @@ def receive_resend_webhook():
         elif ev == "clicked":
             patch["clicked"] = True
             patch["opened"] = True                     # un click implica apertura
+            _link = ((info.get("click") or {}).get("link") or "").strip()
+            if _link:
+                patch["click_url"] = _link             # a qué enlace hizo click el lector
         elif ev == "bounced":
             patch["bounced"] = True
         elif ev == "complained":
