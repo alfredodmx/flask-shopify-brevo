@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 import requests
 import json
 import os
+import re                                                 # NUEVO (parseo de nota)
 import uuid                                               # NUEVO (para el CRM)
 from datetime import datetime, timezone, timedelta        # NUEVO (para el CRM)
 
@@ -36,6 +37,44 @@ BREVO_GET_CONTACT_API_URL = "https://api.sendinblue.com/v3/contacts/{email}"
 
 # Endpoint de la API GraphQL de Shopify
 SHOPIFY_GRAPHQL_URL = f"https://{SHOPIFY_STORE}/admin/api/2023-10/graphql.json"
+
+# ============================================================================
+# NUEVO: cada formulario del sitio pone su propia ETIQUETA en el cliente de
+# Shopify → el CRM sabe de QUÉ formulario vino el lead. Y el WhatsApp + el
+# "¿Qué necesita?" viajan en la NOTA del cliente (Shopify no deja que el
+# formulario público escriba el teléfono del cliente directo). Acá se leen ambos.
+# ============================================================================
+TAG_FORMULARIO = {
+    "formulario cotiza": "Formulario Cotiza",   # sección hero-cotiza.liquid
+    "cotizacion-hero":   "Formulario Cotiza",   # etiqueta anterior del hero (compat)
+    # "formulario xxx":  "Formulario XXX",      # (2º formulario — pendiente)
+    # "formulario yyy":  "Formulario YYY",      # (3er formulario — pendiente)
+}
+
+
+def formulario_de_tags(tags):
+    """Devuelve el nombre del formulario según las etiquetas (string coma-separado)
+    del cliente de Shopify; '' si ninguna etiqueta está mapeada."""
+    for t in str(tags or "").split(","):
+        f = TAG_FORMULARIO.get(t.strip().lower())
+        if f:
+            return f
+    return ""
+
+
+def tel_de_note(note):
+    """Extrae el WhatsApp/teléfono que el formulario guarda en la NOTA del cliente
+    ('WhatsApp: +56 9 ... · Interés: ...'). '' si no encuentra."""
+    m = re.search(r"(?:whatsapp|tel[eé]fono|fono|celular)\s*[:\-]?\s*([+()\d][\d\s()\-+]{6,})",
+                  str(note or ""), re.I)
+    return m.group(1).strip() if m else ""
+
+
+def interes_de_note(note):
+    """Extrae el '¿Qué necesita?' (Interés) que el formulario guarda en la NOTA."""
+    m = re.search(r"inter[eé]s\s*[:\-]\s*(.+?)(?:\s*·\s*whatsapp|\s*$)", str(note or ""), re.I | re.S)
+    return m.group(1).strip() if m else ""
+
 
 # 📌 Función para obtener la URL pública de un archivo (intenta con MediaImage y luego GenericFile)
 def get_public_file_url(gid):
@@ -181,10 +220,12 @@ def notificar_lead_shopify(nombre, cliente_id):
 # ============================================================================
 # NUEVO: escribe el lead también en el CRM (Supabase). Aditivo, no toca Brevo.
 # best-effort: si algo falla, NO rompe el webhook. Loguea el error exacto.
+# Ahora también guarda: FORMULARIO (de las etiquetas), y TELÉFONO + INTERÉS
+# (del campo phone o de la NOTA del cliente).
 # ============================================================================
 def enviar_a_crm(email, first_name, last_name, phone,
                  modelo, precio, describe, plano_url, direccion,
-                 presupuesto, tipo_persona):
+                 presupuesto, tipo_persona, tags="", note=""):
     if not (SUPABASE_URL and SUPABASE_SERVICE_KEY and email):
         print("⚠️ CRM: faltan SUPABASE_URL / SUPABASE_SERVICE_KEY o email; se omite el CRM.", flush=True)
         return
@@ -202,6 +243,11 @@ def enviar_a_crm(email, first_name, last_name, phone,
         v = str(v or "").strip()
         return "" if v.lower().startswith(("sin ", "error")) else v
 
+    # De qué FORMULARIO vino (etiquetas) y datos que el formulario deja en la NOTA.
+    formulario = formulario_de_tags(tags)
+    interes = interes_de_note(note)
+    telefono = (str(phone or "").strip()) or tel_de_note(note)
+
     meta = {
         "modelo": _limpio(modelo),
         "precio": _limpio(precio),
@@ -209,11 +255,13 @@ def enviar_a_crm(email, first_name, last_name, phone,
         "presupuesto": _limpio(presupuesto),
         "tipo_persona": _limpio(tipo_persona),
         "plano_url": plano_url if (plano_url and str(plano_url).startswith("http")) else "",
+        "formulario": formulario,          # NUEVO: qué formulario del sitio generó el lead
+        "interes": interes,                # NUEVO: "¿Qué necesita?" del formulario
     }
     base = {
         "nombre": nombre,
         "email": email,
-        "telefono": phone or "",
+        "telefono": telefono,
         "direccion": _limpio(direccion),
         "tipo": tipo,
         "origen": "Shopify",
@@ -232,7 +280,7 @@ def enviar_a_crm(email, first_name, last_name, phone,
                                   headers={**hdr, "Prefer": "return=minimal"},
                                   params={"id": f"eq.{rows[0]['id']}"}, json=base, timeout=15)
             if resp.ok:
-                print(f"✅ CRM: lead {email} actualizado", flush=True)
+                print(f"✅ CRM: lead {email} actualizado (formulario='{formulario}')", flush=True)
             else:
                 print(f"⚠️ CRM: no se pudo actualizar ({resp.status_code}): {resp.text[:200]}", flush=True)
         else:    # nuevo → cae en la Bandeja como lead
@@ -241,7 +289,7 @@ def enviar_a_crm(email, first_name, last_name, phone,
             resp = requests.post(f"{SUPABASE_URL}/rest/v1/clientes",
                                  headers={**hdr, "Prefer": "return=minimal"}, json=base, timeout=15)
             if resp.ok:
-                print(f"✅ CRM: lead {email} creado", flush=True)
+                print(f"✅ CRM: lead {email} creado (formulario='{formulario}')", flush=True)
                 notificar_lead_shopify(nombre, base["id"])   # avisa a admin/root
             else:
                 print(f"⚠️ CRM: no se pudo crear ({resp.status_code}): {resp.text[:200]}", flush=True)
@@ -270,6 +318,8 @@ def receive_webhook():
         first_name = data.get("first_name", "")
         last_name = data.get("last_name", "")
         phone = data.get("phone", "")
+        tags = data.get("tags", "")   # NUEVO: etiqueta del formulario (p.ej. "FORMULARIO COTIZA")
+        note = data.get("note", "")   # NUEVO: WhatsApp + "¿Qué necesita?" que deja el formulario
 
         if not email or not customer_id:
             print("❌ ERROR: No se recibió un email o ID de cliente válido.")
@@ -281,7 +331,8 @@ def receive_webhook():
         # NUEVO: además de Brevo, mandar el lead al CRM (Supabase) en tiempo real
         enviar_a_crm(email, first_name, last_name, phone,
                      modelo, precio, describe_lo_que_quieres, tengo_un_plano,
-                     tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona)
+                     tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona,
+                     tags=tags, note=note)
 
         # Verificar que los metacampos no estén vacíos
         print("Valores de metacampos:", modelo, precio, describe_lo_que_quieres, tengo_un_plano, tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona)
