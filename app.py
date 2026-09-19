@@ -62,6 +62,18 @@ def formulario_de_tags(tags):
     return ""
 
 
+def formulario_de_note(note):
+    """Devuelve el formulario leído de la NOTA del cliente ('Formulario: FORMULARIO COTIZA
+    · WhatsApp: ... · Interés: ...'). Shopify IGNORA la etiqueta (contact[tags]) desde el
+    formulario público, así que el formulario viaja en la nota. Mapea al nombre bonito;
+    si no está en el mapa, devuelve el crudo. '' si la nota no lo trae."""
+    m = re.search(r"formulario\s*[:\-]\s*(.+?)(?:\s*·|\s*$)", str(note or ""), re.I)
+    if not m:
+        return ""
+    crudo = m.group(1).strip()
+    return TAG_FORMULARIO.get(crudo.lower(), crudo)
+
+
 def tel_de_note(note):
     """Extrae el WhatsApp/teléfono que el formulario guarda en la NOTA del cliente
     ('WhatsApp: +56 9 ... · Interés: ...'). '' si no encuentra."""
@@ -243,8 +255,9 @@ def enviar_a_crm(email, first_name, last_name, phone,
         v = str(v or "").strip()
         return "" if v.lower().startswith(("sin ", "error")) else v
 
-    # De qué FORMULARIO vino (etiquetas) y datos que el formulario deja en la NOTA.
-    formulario = formulario_de_tags(tags)
+    # De qué FORMULARIO vino: primero la etiqueta (por si Shopify la guarda), si no, la
+    # NOTA (Shopify ignora contact[tags] desde el formulario público → viaja en la nota).
+    formulario = formulario_de_tags(tags) or formulario_de_note(note)
     interes = interes_de_note(note)
     telefono = (str(phone or "").strip()) or tel_de_note(note)
 
