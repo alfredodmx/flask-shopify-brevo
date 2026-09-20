@@ -45,10 +45,11 @@ SHOPIFY_GRAPHQL_URL = f"https://{SHOPIFY_STORE}/admin/api/2023-10/graphql.json"
 # formulario público escriba el teléfono del cliente directo). Acá se leen ambos.
 # ============================================================================
 TAG_FORMULARIO = {
-    "formulario cotiza": "Formulario Cotiza",   # sección hero-cotiza.liquid
-    "cotizacion-hero":   "Formulario Cotiza",   # etiqueta anterior del hero (compat)
-    # "formulario xxx":  "Formulario XXX",      # (2º formulario — pendiente)
-    # "formulario yyy":  "Formulario YYY",      # (3er formulario — pendiente)
+    "formulario cotiza": "Formulario Cotiza",                             # sección hero-cotiza.liquid
+    "cotizacion-hero":   "Formulario Cotiza",                             # etiqueta anterior del hero (compat)
+    "formulario modelo prediseñado": "Formulario Modelo Prediseñado",     # multistep-quote-form.liquid (producto)
+    "cotizacion-multipaso": "Formulario Modelo Prediseñado",             # etiqueta anterior del multipaso (compat)
+    # "formulario yyy":  "Formulario YYY",                                # (3er formulario — pendiente)
 }
 
 
@@ -86,6 +87,30 @@ def interes_de_note(note):
     """Extrae el '¿Qué necesita?' (Interés) que el formulario guarda en la NOTA."""
     m = re.search(r"inter[eé]s\s*[:\-]\s*(.+?)(?:\s*·\s*whatsapp|\s*$)", str(note or ""), re.I | re.S)
     return m.group(1).strip() if m else ""
+
+
+def parse_note(note):
+    """Convierte la NOTA del cliente ('Etiqueta: valor · Etiqueta: valor · …') en un dict
+    {etiqueta_en_minúsculas: valor}. Cada formulario del sitio arma su nota con estos pares
+    separados por ' · '; así el CRM recibe todos los campos (modelo, valor, región, plazo,
+    presupuesto, mensaje, etc.) sin depender de metacampos ni de la etiqueta de Shopify."""
+    out = {}
+    for parte in str(note or "").split("·"):
+        if ":" in parte:
+            k, v = parte.split(":", 1)
+            k = k.strip().lower()
+            if k and k not in out:
+                out[k] = v.strip()
+    return out
+
+
+def _primero(d, *claves):
+    """Primer valor no vacío entre varias posibles etiquetas del dict de la nota."""
+    for k in claves:
+        v = str(d.get(k) or "").strip()
+        if v:
+            return v
+    return ""
 
 
 # 📌 Función para obtener la URL pública de un archivo (intenta con MediaImage y luego GenericFile)
@@ -255,17 +280,28 @@ def enviar_a_crm(email, first_name, last_name, phone,
         v = str(v or "").strip()
         return "" if v.lower().startswith(("sin ", "error")) else v
 
-    # De qué FORMULARIO vino: primero la etiqueta (por si Shopify la guarda), si no, la
-    # NOTA (Shopify ignora contact[tags] desde el formulario público → viaja en la nota).
-    formulario = formulario_de_tags(tags) or formulario_de_note(note)
-    interes = interes_de_note(note)
-    telefono = (str(phone or "").strip()) or tel_de_note(note)
+    # Todos los campos que el formulario deja en la NOTA (modelo, valor, región, plazo,
+    # presupuesto, mensaje, whatsapp, interés, formulario). Shopify ignora contact[tags] y
+    # el teléfono desde el formulario público → todo viaja en la nota.
+    np = parse_note(note)
+
+    # De qué FORMULARIO vino: 1º la etiqueta (por si Shopify la guarda), 2º la nota.
+    formulario = formulario_de_tags(tags)
+    if not formulario:
+        _fn = _primero(np, "formulario")
+        formulario = TAG_FORMULARIO.get(_fn.lower(), _fn)
+
+    interes = _primero(np, "interés", "interes")
+    telefono = (str(phone or "").strip()) or _primero(np, "whatsapp", "teléfono", "telefono", "fono", "celular")
 
     meta = {
-        "modelo": _limpio(modelo),
-        "precio": _limpio(precio),
-        "descripcion": _limpio(describe),
-        "presupuesto": _limpio(presupuesto),
+        # Los metacampos (formulario Forms) tienen prioridad; si no, lo que trae la nota.
+        "modelo": _limpio(modelo) or _primero(np, "modelo"),
+        "precio": _limpio(precio) or _primero(np, "valor", "precio"),
+        "descripcion": _limpio(describe) or _primero(np, "mensaje", "descripción", "descripcion"),
+        "presupuesto": _limpio(presupuesto) or _primero(np, "presupuesto"),
+        "region": _primero(np, "región", "region"),
+        "plazo": _primero(np, "plazo", "plazo ideal"),
         "tipo_persona": _limpio(tipo_persona),
         "plano_url": plano_url if (plano_url and str(plano_url).startswith("http")) else "",
         "formulario": formulario,          # NUEVO: qué formulario del sitio generó el lead
@@ -275,7 +311,7 @@ def enviar_a_crm(email, first_name, last_name, phone,
         "nombre": nombre,
         "email": email,
         "telefono": telefono,
-        "direccion": _limpio(direccion),
+        "direccion": _limpio(direccion) or _primero(np, "dirección", "direccion"),
         "tipo": tipo,
         "origen": "Shopify",
         "shopify_meta": meta,
