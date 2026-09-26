@@ -49,7 +49,8 @@ TAG_FORMULARIO = {
     "cotizacion-hero":   "Formulario Cotiza",                             # etiqueta anterior del hero (compat)
     "formulario modelo prediseñado": "Formulario Modelo Prediseñado",     # multistep-quote-form.liquid (producto)
     "cotizacion-multipaso": "Formulario Modelo Prediseñado",             # etiqueta anterior del multipaso (compat)
-    # "formulario yyy":  "Formulario YYY",                                # (3er formulario — pendiente)
+    "formulario personalizado": "Formulario Personalizado",              # container-configurator.liquid
+    "configurador-container": "Formulario Personalizado",                # etiqueta anterior del configurador (compat)
 }
 
 
@@ -302,6 +303,11 @@ def enviar_a_crm(email, first_name, last_name, phone,
         "presupuesto": _limpio(presupuesto) or _primero(np, "presupuesto"),
         "region": _primero(np, "región", "region"),
         "plazo": _primero(np, "plazo", "plazo ideal"),
+        # Configurador (FORMULARIO PERSONALIZADO):
+        "modulo": _primero(np, "módulo", "modulo"),
+        "puertas_ventanas": _primero(np, "puertas y ventanas", "puertas/ventanas", "puertas"),
+        "revestimiento": _primero(np, "revestimiento"),
+        "distribucion": _primero(np, "distribución", "distribucion"),
         "tipo_persona": _limpio(tipo_persona),
         "plano_url": plano_url if (plano_url and str(plano_url).startswith("http")) else "",
         "formulario": formulario,          # NUEVO: qué formulario del sitio generó el lead
