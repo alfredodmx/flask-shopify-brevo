@@ -734,6 +734,54 @@ def receive_resend_webhook():
         print("⚠️ Resend webhook error:", e, flush=True)
         return jsonify({"ok": True}), 200
 
+# 🔎 DIAGNÓSTICO TEMPORAL del correo de leads (se quita después).
+# GET /diag/lead-mail?k=ech-diag-2026           → reporta la config EFECTIVA que lee el Flask.
+# GET /diag/lead-mail?k=ech-diag-2026&send=1     → intenta un envío de prueba SOLO a los
+#   destinatarios configurados (no crea contacto ni CRM, no dispara la automatización vieja)
+#   y devuelve el código + respuesta de Brevo (así vemos si rechaza el remitente).
+@app.route('/diag/lead-mail', methods=['GET'])
+def diag_lead_mail():
+    if request.args.get("k") != "ech-diag-2026":
+        return jsonify({"error": "no autorizado"}), 403
+    _cfg_en = _leer_config_notif("lead_mail_enabled", None)
+    _cfg_to = _leer_config_notif("lead_mail_to", None)
+    _cfg_asunto = _leer_config_notif("lead_mail_asunto", None)
+    _to_raw = (_cfg_to or LEAD_MAIL_TO or NOTIFY_EMAILS or ALERT_TO or "")
+    destinatarios = [e.strip() for e in str(_to_raw).replace("\n", ",").replace(";", ",").split(",") if e.strip()]
+    out = {
+        "cfg_lead_mail_enabled": _cfg_en,
+        "cfg_lead_mail_to": _cfg_to,
+        "cfg_lead_mail_asunto": _cfg_asunto,
+        "env_LEAD_MAIL_ENABLED": LEAD_MAIL_ENABLED,
+        "destinatarios_efectivos": destinatarios,
+        "brevo_sender": BREVO_SENDER,
+        "has_brevo_key": bool(BREVO_API_KEY),
+        "supabase_ok": bool(SUPABASE_URL and SUPABASE_SERVICE_KEY),
+    }
+    if request.args.get("send") == "1":
+        if not (BREVO_API_KEY and BREVO_SENDER and destinatarios):
+            out["send"] = "faltan datos (key/sender/destinatarios)"
+            return jsonify(out), 200
+        payload = {
+            "sender": {"email": BREVO_SENDER, "name": LEAD_MAIL_FROM_NAME},
+            "to": [{"email": e} for e in destinatarios],
+            "subject": "🔥 PRUEBA diagnóstico — correo de leads (Flask)",
+            "htmlContent": _html_correo_lead("Formulario Cotiza", "Prueba Diagnóstico",
+                                             destinatarios[0], "+56912345678",
+                                             {"interés": "Cabaña habitacional 30 m²"}),
+        }
+        try:
+            r = requests.post(BREVO_SEND_EMAIL_URL,
+                              headers={"api-key": BREVO_API_KEY, "Content-Type": "application/json",
+                                       "accept": "application/json"},
+                              json=payload, timeout=20)
+            out["send_status"] = r.status_code
+            out["send_body"] = (r.text or "")[:500]
+        except Exception as e:
+            out["send_error"] = str(e)
+    return jsonify(out), 200
+
+
 # 🔥 Iniciar el servidor en Render
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
