@@ -351,6 +351,206 @@ def enviar_a_crm(email, first_name, last_name, phone,
     except Exception as e:
         print("⚠️ CRM upsert error:", e, flush=True)
 
+# ============================================================================
+# NUEVO: CORREO DE AVISO DEL LEAD, ADAPTADO AL TIPO DE FORMULARIO.
+# Arma y ENVÍA el correo de "nuevo lead" desde el propio Flask, mostrando SOLO los
+# campos del formulario del que vino (COTIZA / MODELO PREDISEÑADO / PERSONALIZADO).
+# Se envía por la API transaccional de Brevo (misma BREVO_API_KEY). ADITIVO y
+# best-effort: NUNCA rompe el webhook.
+#
+# Variables de entorno (Render) que controlan este envío:
+#   LEAD_MAIL_ENABLED = "1" para activarlo (por defecto "0" = apagado → no envía nada).
+#   LEAD_MAIL_TO       = destinatarios coma-separados. Si está vacío usa NOTIFY_EMAILS,
+#                        y si tampoco, ALERT_TO.
+#   BREVO_SENDER / ALERT_FROM_EMAIL / ALERT_FROM = remitente (verificado en Brevo).
+#   ALERT_FROM_NAME    = nombre visible del remitente.
+# ============================================================================
+NOTIFY_EMAILS = os.getenv("NOTIFY_EMAILS", "")
+ALERT_TO = os.getenv("ALERT_TO", "")
+LEAD_MAIL_ENABLED = os.getenv("LEAD_MAIL_ENABLED", "0").strip().lower() in ("1", "true", "si", "sí", "yes", "on")
+LEAD_MAIL_TO = os.getenv("LEAD_MAIL_TO", "")
+BREVO_SENDER = (os.getenv("BREVO_SENDER", "") or os.getenv("ALERT_FROM_EMAIL", "")
+                or os.getenv("ALERT_FROM", "")).strip()
+LEAD_MAIL_FROM_NAME = os.getenv("ALERT_FROM_NAME", "Espacio Container House")
+BREVO_SEND_EMAIL_URL = "https://api.brevo.com/v3/smtp/email"
+
+_MARCA_NAVY = "#182230"
+_MARCA_NARANJA = "#F56E14"
+
+
+def _esc_html(s):
+    return (str(s or "")
+            .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def _campos_por_formulario(formulario, nombre, email, whatsapp, np):
+    """[(etiqueta, valor)] SOLO con los campos del formulario correspondiente. El orden es
+    el que debe verse en el correo. 'base' = datos de contacto comunes a los 3 formularios."""
+    f = str(formulario or "").strip().lower()
+    base = [("Nombre", nombre), ("Email", email), ("WhatsApp", whatsapp)]
+    if f == "formulario cotiza":
+        return base + [("¿Qué necesita?", _primero(np, "interés", "interes"))]
+    if f == "formulario modelo prediseñado":
+        return base + [
+            ("Modelo", _primero(np, "modelo")),
+            ("Valor", _primero(np, "valor", "precio")),
+            ("Región", _primero(np, "región", "region")),
+            ("Plazo", _primero(np, "plazo", "plazo ideal")),
+            ("Presupuesto", _primero(np, "presupuesto")),
+            ("Mensaje", _primero(np, "mensaje")),
+        ]
+    if f == "formulario personalizado":
+        return base + [
+            ("Módulo", _primero(np, "módulo", "modulo")),
+            ("Puertas y ventanas", _primero(np, "puertas y ventanas", "puertas/ventanas", "puertas")),
+            ("Revestimiento", _primero(np, "revestimiento")),
+            ("Distribución", _primero(np, "distribución", "distribucion")),
+            ("Presupuesto", _primero(np, "presupuesto")),
+            ("Mensaje", _primero(np, "mensaje")),
+        ]
+    # Formulario no identificado → base + todo lo que traiga la nota (menos 'formulario').
+    extra = [(k[:1].upper() + k[1:], v) for k, v in np.items() if k != "formulario"]
+    return base + extra
+
+
+def _html_correo_lead(formulario, nombre, email, whatsapp, np):
+    """HTML (email-safe, estilos inline) del correo de aviso, con los campos del formulario."""
+    _form_label = str(formulario or "Sin identificar").upper()
+    _wa_digits = re.sub(r"[^\d]", "", str(whatsapp or ""))
+    filas = ""
+    for etq, val in _campos_por_formulario(formulario, nombre, email, whatsapp, np):
+        val = str(val or "").strip()
+        if not val and etq not in ("Nombre", "Email", "WhatsApp"):
+            continue                              # oculta campos opcionales vacíos
+        if etq == "WhatsApp" and _wa_digits:
+            val_html = (f'<a href="https://wa.me/{_wa_digits}" style="color:{_MARCA_NARANJA};'
+                        f'text-decoration:none;font-weight:700;">{_esc_html(val)}</a>')
+        elif etq == "Email" and val:
+            val_html = (f'<a href="mailto:{_esc_html(val)}" style="color:{_MARCA_NARANJA};'
+                        f'text-decoration:none;font-weight:700;">{_esc_html(val)}</a>')
+        else:
+            val_html = _esc_html(val or "—")
+        filas += (
+            '<tr>'
+            f'<td style="padding:12px 18px;border-bottom:1px solid #eef1f5;font-size:11px;font-weight:700;'
+            f'text-transform:uppercase;letter-spacing:.05em;color:#8a94a6;white-space:nowrap;vertical-align:top;">'
+            f'{_esc_html(etq)}</td>'
+            f'<td style="padding:12px 18px;border-bottom:1px solid #eef1f5;font-size:15px;line-height:1.5;'
+            f'color:{_MARCA_NAVY};font-weight:600;">{val_html}</td>'
+            '</tr>')
+
+    _cta = ""
+    if _wa_digits:
+        _cta = (f'<tr><td colspan="2" style="padding:20px 18px 6px;text-align:center;">'
+                f'<a href="https://wa.me/{_wa_digits}" style="display:inline-block;background:#25D366;'
+                f'color:#fff;text-decoration:none;font-weight:700;font-size:14px;padding:12px 26px;'
+                f'border-radius:6px;">Responder por WhatsApp</a></td></tr>')
+
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f4f6f9;font-family:Arial,Helvetica,sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f9;padding:24px 12px;">
+    <tr><td align="center">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 8px 24px rgba(24,34,48,.08);">
+        <tr><td style="background:{_MARCA_NAVY};padding:26px 24px;">
+          <span style="display:inline-block;background:rgba(245,110,20,.16);color:{_MARCA_NARANJA};font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;padding:6px 12px;border-radius:999px;border:1px solid rgba(245,110,20,.5);">{_esc_html(_form_label)}</span>
+          <h1 style="margin:14px 0 0;color:#ffffff;font-size:22px;font-weight:800;letter-spacing:-.01em;">Nuevo lead registrado 🔥</h1>
+          <p style="margin:6px 0 0;color:rgba(255,255,255,.6);font-size:13px;">Desde el sitio web · Espacio Container House</p>
+        </td></tr>
+        <tr><td style="padding:8px 6px;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0">{filas}{_cta}</table>
+        </td></tr>
+        <tr><td style="padding:16px 24px 24px;">
+          <p style="margin:0;color:#9aa4b2;font-size:12px;line-height:1.6;text-align:center;">
+            Este lead ya quedó en el CRM, en la Bandeja. Revísalo y asígnalo a un ejecutivo.
+          </p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>"""
+
+
+def _leer_config_notif(clave, default=None):
+    """Lee un valor de la tabla notificaciones_config de Supabase (clave/valor) — la MISMA
+    que usa la pestaña NOTIFICACIONES del sistema para configurar este correo. best-effort:
+    si Supabase no responde, devuelve `default` (y el llamador cae a las variables de entorno)."""
+    if not (SUPABASE_URL and SUPABASE_SERVICE_KEY):
+        return default
+    try:
+        hdr = {"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"}
+        r = requests.get(f"{SUPABASE_URL}/rest/v1/notificaciones_config", headers=hdr,
+                         params={"clave": f"eq.{clave}", "select": "valor", "limit": 1}, timeout=10)
+        if r.ok and r.json():
+            v = r.json()[0].get("valor")
+            return v if v is not None else default
+    except Exception as e:
+        print("⚠️ Correo de lead: no pude leer notificaciones_config:", e, flush=True)
+    return default
+
+
+_DEFAULT_ASUNTO_LEAD = "🔥 Nuevo lead — {formulario} · {nombre}"
+
+
+def _render_asunto_lead(tpl, formulario, nombre, email, whatsapp):
+    """Reemplaza las variables {formulario} {nombre} {email} {whatsapp} del asunto configurable."""
+    _f = str(formulario or "Sin identificar").upper()
+    out = str(tpl or _DEFAULT_ASUNTO_LEAD)
+    for k, v in (("{formulario}", _f), ("{nombre}", nombre or ""),
+                 ("{email}", email or ""), ("{whatsapp}", whatsapp or "")):
+        out = out.replace(k, v)
+    return out.strip() or f"Nuevo lead — {_f}"
+
+
+def enviar_correo_lead(email, first_name, last_name, note, tags=""):
+    """Envía el correo de aviso de nuevo lead con el contenido según el tipo de formulario.
+    La config (encendido, destinatarios, asunto) se lee de Supabase notificaciones_config —
+    editable desde la pestaña NOTIFICACIONES del sistema — con fallback a variables de entorno.
+    ADITIVO y best-effort (nunca rompe el webhook). Devuelve True si se envió."""
+    # Encendido: 1º la config del sistema; si no existe, la variable de entorno.
+    _cfg_en = _leer_config_notif("lead_mail_enabled", None)
+    if _cfg_en is not None:
+        enabled = str(_cfg_en).strip().lower() in ("1", "true", "si", "sí", "yes", "on")
+    else:
+        enabled = LEAD_MAIL_ENABLED
+    if not enabled:
+        print("ℹ️ Correo de lead: desactivado (pestaña NOTIFICACIONES / LEAD_MAIL_ENABLED).", flush=True)
+        return False
+    # Destinatarios: 1º la config del sistema; si no, las variables de entorno.
+    _to_raw = (_leer_config_notif("lead_mail_to", "") or LEAD_MAIL_TO or NOTIFY_EMAILS or ALERT_TO or "")
+    destinatarios = [e.strip() for e in str(_to_raw).replace("\n", ",").replace(";", ",").split(",") if e.strip()]
+    if not (BREVO_API_KEY and BREVO_SENDER and destinatarios):
+        print("⚠️ Correo de lead: falta BREVO_API_KEY / remitente (BREVO_SENDER) / destinatarios.", flush=True)
+        return False
+    np = parse_note(note)
+    formulario = formulario_de_note(note) or formulario_de_tags(tags) or _primero(np, "formulario")
+    formulario = TAG_FORMULARIO.get(str(formulario).strip().lower(), formulario)   # normaliza al nombre bonito
+    nombre = (f"{first_name or ''} {last_name or ''}").strip() or (email or "")
+    whatsapp = tel_de_note(note) or _primero(np, "whatsapp", "teléfono", "telefono", "fono", "celular")
+    asunto = _render_asunto_lead(_leer_config_notif("lead_mail_asunto", "") or _DEFAULT_ASUNTO_LEAD,
+                                 formulario, nombre, email, whatsapp)
+    payload = {
+        "sender": {"email": BREVO_SENDER, "name": LEAD_MAIL_FROM_NAME},
+        "to": [{"email": e} for e in destinatarios],
+        "subject": asunto,
+        "htmlContent": _html_correo_lead(formulario, nombre, email, whatsapp, np),
+    }
+    if email:
+        payload["replyTo"] = {"email": email, "name": nombre or email}
+    try:
+        r = requests.post(BREVO_SEND_EMAIL_URL,
+                          headers={"api-key": BREVO_API_KEY, "Content-Type": "application/json",
+                                   "accept": "application/json"},
+                          json=payload, timeout=20)
+        if r.status_code in (200, 201):
+            print(f"✅ Correo de lead enviado a {len(destinatarios)} dest. (formulario='{formulario}')", flush=True)
+            return True
+        print(f"⚠️ Correo de lead: Brevo respondió {r.status_code}: {r.text[:200]}", flush=True)
+    except Exception as e:
+        print("⚠️ Correo de lead error:", e, flush=True)
+    return False
+
+
 # 📩 Ruta del webhook que Shopify enviará a esta API
 @app.route('/webhook/shopify', methods=['POST'])
 def receive_webhook():
@@ -388,6 +588,13 @@ def receive_webhook():
                      modelo, precio, describe_lo_que_quieres, tengo_un_plano,
                      tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona,
                      tags=tags, note=note)
+
+        # NUEVO: correo de aviso del lead, con el contenido SEGÚN el tipo de formulario
+        # (COTIZA / MODELO PREDISEÑADO / PERSONALIZADO). best-effort → nunca rompe el webhook.
+        try:
+            enviar_correo_lead(email, first_name, last_name, note, tags=tags)
+        except Exception as _e:
+            print("⚠️ enviar_correo_lead falló (ignorado):", _e, flush=True)
 
         # Verificar que los metacampos no estén vacíos
         print("Valores de metacampos:", modelo, precio, describe_lo_que_quieres, tengo_un_plano, tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona)
