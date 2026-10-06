@@ -651,18 +651,26 @@ def receive_webhook():
         # 🔍 Obtener los metacampos desde Shopify
         modelo, precio, describe_lo_que_quieres, tengo_un_plano, tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona = get_customer_metafields(customer_id)
 
-        # NUEVO: además de Brevo, mandar el lead al CRM (Supabase) en tiempo real
-        enviar_a_crm(email, first_name, last_name, phone,
-                     modelo, precio, describe_lo_que_quieres, tengo_un_plano,
-                     tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona,
-                     tags=tags, note=note)
-
-        # NUEVO: correo de aviso del lead, con el contenido SEGÚN el tipo de formulario
-        # (COTIZA / MODELO PREDISEÑADO / PERSONALIZADO). best-effort → nunca rompe el webhook.
-        try:
-            enviar_correo_lead(email, first_name, last_name, note, tags=tags)
-        except Exception as _e:
-            print("⚠️ enviar_correo_lead falló (ignorado):", _e, flush=True)
+        # GUARD: solo tratamos como LEAD a los clientes que vienen de los 3 formularios reales
+        # (la nota trae 'Formulario: ...' o la etiqueta mapea a un formulario). Así el newsletter
+        # del footer u otras creaciones de cliente NO generan lead en el CRM ni correo de aviso.
+        # (Además, ahora los formularios envían DIRECTO por /lead-form, así que este webhook casi
+        #  siempre será newsletter/manual → se omite correctamente.)
+        _es_lead_form = ("formulario:" in str(note or "").lower()) or bool(formulario_de_tags(tags))
+        if _es_lead_form:
+            # NUEVO: además de Brevo, mandar el lead al CRM (Supabase) en tiempo real
+            enviar_a_crm(email, first_name, last_name, phone,
+                         modelo, precio, describe_lo_que_quieres, tengo_un_plano,
+                         tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona,
+                         tags=tags, note=note)
+            # NUEVO: correo de aviso del lead, con el contenido SEGÚN el tipo de formulario
+            # (COTIZA / MODELO PREDISEÑADO / PERSONALIZADO). best-effort → nunca rompe el webhook.
+            try:
+                enviar_correo_lead(email, first_name, last_name, note, tags=tags)
+            except Exception as _e:
+                print("⚠️ enviar_correo_lead falló (ignorado):", _e, flush=True)
+        else:
+            print(f"ℹ️ Webhook: cliente {email} NO es lead de formulario (newsletter/manual) → no CRM, no correo.", flush=True)
 
         # Verificar que los metacampos no estén vacíos
         print("Valores de metacampos:", modelo, precio, describe_lo_que_quieres, tengo_un_plano, tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona)
@@ -801,6 +809,61 @@ def receive_resend_webhook():
     except Exception as e:
         print("⚠️ Resend webhook error:", e, flush=True)
         return jsonify({"ok": True}), 200
+
+# ============================================================================
+# NUEVO: ENVÍO DIRECTO DESDE LOS FORMULARIOS (AJAX), SIN CREAR CUENTA EN SHOPIFY.
+# Los 3 formularios del sitio hacen fetch() a este endpoint con {first_name, email, note}
+# (la MISMA nota 'Formulario: ... · ...' que ya arman). Así NO se toca el endpoint de
+# cuentas de Shopify → sin captcha /challenge, sin Cloudflare, sin lentitud, y cada lead
+# llega bien etiquetado (imposible que un formulario dispare el correo de otro). Reusa la
+# misma lógica de CRM + correo. CORS habilitado para el sitio. best-effort.
+# ============================================================================
+_LEAD_FORM_ORIGINS = os.getenv("LEAD_FORM_ORIGINS", "*")
+
+
+def _cors_headers(resp):
+    try:
+        origin = request.headers.get("Origin", "")
+    except Exception:
+        origin = ""
+    allow = "*"
+    if _LEAD_FORM_ORIGINS and _LEAD_FORM_ORIGINS != "*":
+        _allowed = [o.strip() for o in _LEAD_FORM_ORIGINS.split(",") if o.strip()]
+        allow = origin if origin in _allowed else (_allowed[0] if _allowed else "*")
+    resp.headers["Access-Control-Allow-Origin"] = allow
+    resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    resp.headers["Access-Control-Max-Age"] = "86400"
+    return resp
+
+
+@app.route('/lead-form', methods=['POST', 'OPTIONS'])
+def lead_form():
+    from flask import make_response
+    if request.method == 'OPTIONS':
+        return _cors_headers(make_response(('', 204)))
+    data = request.get_json(silent=True) or {}
+    first_name = str(data.get("first_name") or data.get("nombre") or "").strip()
+    last_name = str(data.get("last_name") or "").strip()
+    email = str(data.get("email") or "").strip()
+    note = str(data.get("note") or "").strip()
+    website = str(data.get("website") or "").strip()   # honeypot anti-bot
+    if website:
+        return _cors_headers(make_response(jsonify({"ok": True, "ignored": "bot"}), 200))
+    if not email or "formulario:" not in note.lower():
+        return _cors_headers(make_response(jsonify({"ok": False, "error": "datos insuficientes"}), 400))
+    print(f"📥 lead-form (directo): {email} | {note[:140]}", flush=True)
+    try:
+        enviar_a_crm(email, first_name, last_name, "", "", "", "", "", "", "", "",
+                     tags="", note=note)
+    except Exception as e:
+        print("⚠️ lead-form CRM error:", e, flush=True)
+    try:
+        enviar_correo_lead(email, first_name, last_name, note, tags="")
+    except Exception as e:
+        print("⚠️ lead-form correo error:", e, flush=True)
+    return _cors_headers(make_response(jsonify({"ok": True}), 200))
+
 
 # 🔎 DIAGNÓSTICO TEMPORAL del correo de leads (se quita después).
 # GET /diag/lead-mail?k=ech-diag-2026           → reporta la config EFECTIVA que lee el Flask.
