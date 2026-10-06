@@ -852,6 +852,27 @@ def diag_lead_mail():
     return jsonify(out), 200
 
 
+# 🔎 DIAGNÓSTICO TEMPORAL: lista TODOS los webhooks que Shopify tiene registrados
+# (para ubicar qué servicios reciben los eventos de cliente, p.ej. el que manda el correo
+# viejo por Zoho). GET /diag/webhooks?k=ech-diag-2026
+@app.route('/diag/webhooks', methods=['GET'])
+def diag_webhooks():
+    if request.args.get("k") != "ech-diag-2026":
+        return jsonify({"error": "no autorizado"}), 403
+    try:
+        r = requests.get(f"https://{SHOPIFY_STORE}/admin/api/2023-10/webhooks.json",
+                         headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+                                  "Content-Type": "application/json"},
+                         timeout=20, verify=False)
+        data = r.json() if r.status_code == 200 else {}
+        hooks = [{"topic": w.get("topic"), "address": w.get("address"),
+                  "created_at": w.get("created_at"), "id": w.get("id")}
+                 for w in (data.get("webhooks") or [])]
+        return jsonify({"status": r.status_code, "count": len(hooks), "webhooks": hooks}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 200
+
+
 # 🔥 Iniciar el servidor en Render
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
