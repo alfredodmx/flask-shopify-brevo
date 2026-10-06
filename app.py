@@ -384,6 +384,11 @@ ALERT_SMTP_USER = os.getenv("ALERT_SMTP_USER", "").strip()
 ALERT_SMTP_PASS = os.getenv("ALERT_SMTP_PASS", "")
 ALERT_FROM = (os.getenv("ALERT_FROM", "") or os.getenv("ALERT_FROM_EMAIL", "")
               or ALERT_SMTP_USER or BREVO_SENDER).strip()
+# Resend: API HTTP (NO bloqueada por Render) con el dominio mail.espaciocontainerhouse.cl
+# verificado (DKIM/SPF) → entrega en Recibidos. Es el canal que ya usa el CRM del sistema.
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip()
+RESEND_FROM = os.getenv("RESEND_FROM", "Espacio Container House <ventas@mail.espaciocontainerhouse.cl>").strip()
+RESEND_SEND_URL = "https://api.resend.com/emails"
 
 _MARCA_NAVY = "#182230"
 _MARCA_NARANJA = "#F56E14"
@@ -538,16 +543,30 @@ def _enviar_smtp_zoho(destinatarios, asunto, html, reply_to="", reply_name=""):
 
 
 def _enviar_correo(destinatarios, asunto, html, reply_to="", reply_name=""):
-    """Envía por Zoho SMTP (si está configurado — la misma infra del correo viejo que llega a
-    Recibidos) y, si falla o no está, por Brevo transaccional. Devuelve (ok, canal, detalle)."""
-    _zoho_err = "no configurado"
-    if ALERT_SMTP_HOST and ALERT_SMTP_USER and ALERT_SMTP_PASS and destinatarios:
-        ok, err = _enviar_smtp_zoho(destinatarios, asunto, html, reply_to, reply_name)
-        if ok:
-            return True, "zoho", None
-        _zoho_err = err
-    if not (BREVO_API_KEY and BREVO_SENDER and destinatarios):
-        return False, "ninguno", f"zoho: {_zoho_err}; brevo: sin key/sender/destinatarios"
+    """Envía por RESEND (API HTTP, dominio mail.espaciocontainerhouse.cl verificado → Inbox)
+    con Brevo transaccional de respaldo. NO se usa Zoho SMTP: Render bloquea el SMTP saliente.
+    Devuelve (ok, canal, detalle)."""
+    if not destinatarios:
+        return False, "ninguno", "sin destinatarios"
+    # 1) Resend (preferido)
+    _resend_err = "sin RESEND_API_KEY"
+    if RESEND_API_KEY:
+        payload = {"from": RESEND_FROM, "to": destinatarios, "subject": asunto, "html": html}
+        if reply_to:
+            payload["reply_to"] = reply_to
+        try:
+            r = requests.post(RESEND_SEND_URL,
+                              headers={"Authorization": f"Bearer {RESEND_API_KEY}",
+                                       "Content-Type": "application/json"},
+                              json=payload, timeout=20)
+            if r.status_code in (200, 201):
+                return True, "resend", None
+            _resend_err = f"{r.status_code}: {(r.text or '')[:150]}"
+        except Exception as e:
+            _resend_err = str(e)
+    # 2) Brevo (respaldo)
+    if not (BREVO_API_KEY and BREVO_SENDER):
+        return False, "ninguno", f"resend: {_resend_err}; brevo: sin key/sender"
     payload = {"sender": {"email": BREVO_SENDER, "name": LEAD_MAIL_FROM_NAME},
                "to": [{"email": e} for e in destinatarios], "subject": asunto, "htmlContent": html}
     if reply_to:
@@ -558,10 +577,10 @@ def _enviar_correo(destinatarios, asunto, html, reply_to="", reply_name=""):
                                    "accept": "application/json"},
                           json=payload, timeout=20)
         if r.status_code in (200, 201):
-            return True, "brevo", None
-        return False, "brevo", f"zoho: {_zoho_err}; brevo {r.status_code}: {(r.text or '')[:150]}"
+            return True, "brevo", f"resend falló ({_resend_err})"
+        return False, "brevo", f"resend: {_resend_err}; brevo {r.status_code}: {(r.text or '')[:150]}"
     except Exception as e:
-        return False, "brevo", f"zoho: {_zoho_err}; brevo error: {e}"
+        return False, "brevo", f"resend: {_resend_err}; brevo error: {e}"
 
 
 def enviar_correo_lead(email, first_name, last_name, note, tags=""):
@@ -803,8 +822,9 @@ def diag_lead_mail():
         "cfg_lead_mail_asunto": _cfg_asunto,
         "env_LEAD_MAIL_ENABLED": LEAD_MAIL_ENABLED,
         "destinatarios_efectivos": destinatarios,
+        "resend_configurado": bool(RESEND_API_KEY),
+        "resend_from": RESEND_FROM,
         "zoho_smtp_configurado": bool(ALERT_SMTP_HOST and ALERT_SMTP_USER and ALERT_SMTP_PASS),
-        "zoho_from": ALERT_FROM,
         "brevo_sender": BREVO_SENDER,
         "has_brevo_key": bool(BREVO_API_KEY),
         "supabase_ok": bool(SUPABASE_URL and SUPABASE_SERVICE_KEY),
