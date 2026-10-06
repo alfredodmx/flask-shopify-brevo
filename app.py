@@ -373,6 +373,17 @@ BREVO_SENDER = (os.getenv("BREVO_SENDER", "") or os.getenv("ALERT_FROM_EMAIL", "
                 or os.getenv("ALERT_FROM", "")).strip()
 LEAD_MAIL_FROM_NAME = os.getenv("ALERT_FROM_NAME", "Espacio Container House")
 BREVO_SEND_EMAIL_URL = "https://api.brevo.com/v3/smtp/email"
+# Canal Zoho SMTP: MISMA infraestructura que ya entrega el correo viejo a Recibidos
+# (DKIM/SPF/DMARC del dominio alineados). Se prefiere Zoho; Brevo queda de respaldo.
+ALERT_SMTP_HOST = os.getenv("ALERT_SMTP_HOST", "").strip()
+try:
+    ALERT_SMTP_PORT = int(os.getenv("ALERT_SMTP_PORT", "587") or "587")
+except Exception:
+    ALERT_SMTP_PORT = 587
+ALERT_SMTP_USER = os.getenv("ALERT_SMTP_USER", "").strip()
+ALERT_SMTP_PASS = os.getenv("ALERT_SMTP_PASS", "")
+ALERT_FROM = (os.getenv("ALERT_FROM", "") or os.getenv("ALERT_FROM_EMAIL", "")
+              or ALERT_SMTP_USER or BREVO_SENDER).strip()
 
 _MARCA_NAVY = "#182230"
 _MARCA_NARANJA = "#F56E14"
@@ -502,6 +513,57 @@ def _render_asunto_lead(tpl, formulario, nombre, email, whatsapp):
     return out.strip() or f"Nuevo lead — {_f}"
 
 
+def _enviar_smtp_zoho(destinatarios, asunto, html, reply_to="", reply_name=""):
+    """Envía el correo por Zoho SMTP (STARTTLS). Devuelve (ok, error)."""
+    import smtplib
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+    _from = ALERT_FROM or ALERT_SMTP_USER
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = asunto
+    msg["From"] = f"{LEAD_MAIL_FROM_NAME} <{_from}>"
+    msg["To"] = ", ".join(destinatarios)
+    if reply_to:
+        msg["Reply-To"] = f"{reply_name} <{reply_to}>" if reply_name else reply_to
+    msg.attach(MIMEText(html, "html", "utf-8"))
+    try:
+        srv = smtplib.SMTP(ALERT_SMTP_HOST, ALERT_SMTP_PORT, timeout=20)
+        srv.ehlo(); srv.starttls(); srv.ehlo()
+        srv.login(ALERT_SMTP_USER, ALERT_SMTP_PASS)
+        srv.sendmail(_from, destinatarios, msg.as_string())
+        srv.quit()
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def _enviar_correo(destinatarios, asunto, html, reply_to="", reply_name=""):
+    """Envía por Zoho SMTP (si está configurado — la misma infra del correo viejo que llega a
+    Recibidos) y, si falla o no está, por Brevo transaccional. Devuelve (ok, canal, detalle)."""
+    _zoho_err = "no configurado"
+    if ALERT_SMTP_HOST and ALERT_SMTP_USER and ALERT_SMTP_PASS and destinatarios:
+        ok, err = _enviar_smtp_zoho(destinatarios, asunto, html, reply_to, reply_name)
+        if ok:
+            return True, "zoho", None
+        _zoho_err = err
+    if not (BREVO_API_KEY and BREVO_SENDER and destinatarios):
+        return False, "ninguno", f"zoho: {_zoho_err}; brevo: sin key/sender/destinatarios"
+    payload = {"sender": {"email": BREVO_SENDER, "name": LEAD_MAIL_FROM_NAME},
+               "to": [{"email": e} for e in destinatarios], "subject": asunto, "htmlContent": html}
+    if reply_to:
+        payload["replyTo"] = {"email": reply_to, "name": reply_name or reply_to}
+    try:
+        r = requests.post(BREVO_SEND_EMAIL_URL,
+                          headers={"api-key": BREVO_API_KEY, "Content-Type": "application/json",
+                                   "accept": "application/json"},
+                          json=payload, timeout=20)
+        if r.status_code in (200, 201):
+            return True, "brevo", None
+        return False, "brevo", f"zoho: {_zoho_err}; brevo {r.status_code}: {(r.text or '')[:150]}"
+    except Exception as e:
+        return False, "brevo", f"zoho: {_zoho_err}; brevo error: {e}"
+
+
 def enviar_correo_lead(email, first_name, last_name, note, tags=""):
     """Envía el correo de aviso de nuevo lead con el contenido según el tipo de formulario.
     La config (encendido, destinatarios, asunto) se lee de Supabase notificaciones_config —
@@ -529,25 +591,12 @@ def enviar_correo_lead(email, first_name, last_name, note, tags=""):
     whatsapp = tel_de_note(note) or _primero(np, "whatsapp", "teléfono", "telefono", "fono", "celular")
     asunto = _render_asunto_lead(_leer_config_notif("lead_mail_asunto", "") or _DEFAULT_ASUNTO_LEAD,
                                  formulario, nombre, email, whatsapp)
-    payload = {
-        "sender": {"email": BREVO_SENDER, "name": LEAD_MAIL_FROM_NAME},
-        "to": [{"email": e} for e in destinatarios],
-        "subject": asunto,
-        "htmlContent": _html_correo_lead(formulario, nombre, email, whatsapp, np),
-    }
-    if email:
-        payload["replyTo"] = {"email": email, "name": nombre or email}
-    try:
-        r = requests.post(BREVO_SEND_EMAIL_URL,
-                          headers={"api-key": BREVO_API_KEY, "Content-Type": "application/json",
-                                   "accept": "application/json"},
-                          json=payload, timeout=20)
-        if r.status_code in (200, 201):
-            print(f"✅ Correo de lead enviado a {len(destinatarios)} dest. (formulario='{formulario}')", flush=True)
-            return True
-        print(f"⚠️ Correo de lead: Brevo respondió {r.status_code}: {r.text[:200]}", flush=True)
-    except Exception as e:
-        print("⚠️ Correo de lead error:", e, flush=True)
+    html = _html_correo_lead(formulario, nombre, email, whatsapp, np)
+    ok, canal, detalle = _enviar_correo(destinatarios, asunto, html, reply_to=email, reply_name=nombre)
+    if ok:
+        print(f"✅ Correo de lead enviado por {canal} a {len(destinatarios)} dest. (formulario='{formulario}')", flush=True)
+        return True
+    print(f"⚠️ Correo de lead: no se pudo enviar ({detalle})", flush=True)
     return False
 
 
@@ -754,31 +803,24 @@ def diag_lead_mail():
         "cfg_lead_mail_asunto": _cfg_asunto,
         "env_LEAD_MAIL_ENABLED": LEAD_MAIL_ENABLED,
         "destinatarios_efectivos": destinatarios,
+        "zoho_smtp_configurado": bool(ALERT_SMTP_HOST and ALERT_SMTP_USER and ALERT_SMTP_PASS),
+        "zoho_from": ALERT_FROM,
         "brevo_sender": BREVO_SENDER,
         "has_brevo_key": bool(BREVO_API_KEY),
         "supabase_ok": bool(SUPABASE_URL and SUPABASE_SERVICE_KEY),
     }
     if request.args.get("send") == "1":
-        if not (BREVO_API_KEY and BREVO_SENDER and destinatarios):
-            out["send"] = "faltan datos (key/sender/destinatarios)"
+        if not destinatarios:
+            out["send"] = "faltan destinatarios"
             return jsonify(out), 200
-        payload = {
-            "sender": {"email": BREVO_SENDER, "name": LEAD_MAIL_FROM_NAME},
-            "to": [{"email": e} for e in destinatarios],
-            "subject": "🔥 PRUEBA diagnóstico — correo de leads (Flask)",
-            "htmlContent": _html_correo_lead("Formulario Cotiza", "Prueba Diagnóstico",
-                                             destinatarios[0], "+56912345678",
-                                             {"interés": "Cabaña habitacional 30 m²"}),
-        }
-        try:
-            r = requests.post(BREVO_SEND_EMAIL_URL,
-                              headers={"api-key": BREVO_API_KEY, "Content-Type": "application/json",
-                                       "accept": "application/json"},
-                              json=payload, timeout=20)
-            out["send_status"] = r.status_code
-            out["send_body"] = (r.text or "")[:500]
-        except Exception as e:
-            out["send_error"] = str(e)
+        _html = _html_correo_lead("Formulario Cotiza", "Prueba Diagnóstico",
+                                  destinatarios[0], "+56912345678",
+                                  {"interés": "Cabaña habitacional 30 m²"})
+        ok, canal, detalle = _enviar_correo(destinatarios,
+                                            "🔥 PRUEBA diagnóstico — correo de leads (Flask)", _html)
+        out["send_ok"] = ok
+        out["send_canal"] = canal
+        out["send_detalle"] = detalle
     return jsonify(out), 200
 
 
