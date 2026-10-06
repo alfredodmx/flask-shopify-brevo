@@ -809,13 +809,21 @@ def diag_lead_mail():
         "has_brevo_key": bool(BREVO_API_KEY),
         "supabase_ok": bool(SUPABASE_URL and SUPABASE_SERVICE_KEY),
     }
+    _html = _html_correo_lead("Formulario Cotiza", "Prueba Diagnóstico",
+                              destinatarios[0] if destinatarios else "test@test.cl", "+56912345678",
+                              {"interés": "Cabaña habitacional 30 m²"})
+    if request.args.get("zohotest") == "1" and destinatarios:
+        # Prueba SOLO Zoho SMTP y devuelve su error crudo (sin caer a Brevo).
+        ok, err = _enviar_smtp_zoho(destinatarios, "🔥 PRUEBA Zoho SMTP — correo de leads", _html)
+        out["zoho_send_ok"] = ok
+        out["zoho_send_error"] = err
+        out["zoho_host"] = ALERT_SMTP_HOST
+        out["zoho_port"] = ALERT_SMTP_PORT
+        out["zoho_user"] = ALERT_SMTP_USER
     if request.args.get("send") == "1":
         if not destinatarios:
             out["send"] = "faltan destinatarios"
             return jsonify(out), 200
-        _html = _html_correo_lead("Formulario Cotiza", "Prueba Diagnóstico",
-                                  destinatarios[0], "+56912345678",
-                                  {"interés": "Cabaña habitacional 30 m²"})
         ok, canal, detalle = _enviar_correo(destinatarios,
                                             "🔥 PRUEBA diagnóstico — correo de leads (Flask)", _html)
         out["send_ok"] = ok
