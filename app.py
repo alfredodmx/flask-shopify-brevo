@@ -619,134 +619,105 @@ def enviar_correo_lead(email, first_name, last_name, note, tags=""):
     return False
 
 
-# 📩 Ruta del webhook que Shopify enviará a esta API
-@app.route('/webhook/shopify', methods=['POST'])
-def receive_webhook():
+# Dedupe de webhooks: Shopify puede entregar/reintentar el MISMO evento varias veces.
+# Recordamos el customer_id procesado recientemente para NO reenviar el correo dos veces.
+import threading as _threading
+import time as _time_mod
+_WEBHOOK_VISTOS = {}
+_WEBHOOK_LOCK = _threading.Lock()
+_WEBHOOK_TTL = 1800  # 30 min
+
+
+def _webhook_ya_procesado(cid):
+    """True (y lo marca) si este customer_id ya se procesó en los últimos _WEBHOOK_TTL seg."""
+    if not cid:
+        return False
+    now = _time_mod.time()
+    with _WEBHOOK_LOCK:
+        for _k in [k for k, t in list(_WEBHOOK_VISTOS.items()) if now - t > _WEBHOOK_TTL]:
+            _WEBHOOK_VISTOS.pop(_k, None)
+        if str(cid) in _WEBHOOK_VISTOS:
+            return True
+        _WEBHOOK_VISTOS[str(cid)] = now
+        return False
+
+
+def _procesar_webhook_shopify(data):
+    """Procesa el webhook de cliente en SEGUNDO PLANO (CRM + correo + Brevo). best-effort:
+    NUNCA lanza y NO usa jsonify (no hay contexto de request en el hilo). Se corre en un hilo
+    para que la respuesta a Shopify sea inmediata → evita timeouts → reintentos → duplicados."""
     try:
-        raw_data = request.data.decode('utf-8')  # Capturar datos crudos del webhook
-        print("📩 Webhook recibido (RAW):", raw_data)
-
-        # Intentar parsear JSON
-        data = request.get_json(silent=True)
-
-        if not data:
-            print("❌ ERROR: No se pudo interpretar el JSON correctamente.")
-            return jsonify({"error": "Webhook sin JSON válido"}), 400
-
-        print("📩 Webhook recibido de Shopify (JSON):", json.dumps(data, indent=4))
-
-        # Extraer información básica
-        customer_id = data.get("id")  # Obtener el ID del cliente para buscar metacampos
+        customer_id = data.get("id")
         email = data.get("email")
         first_name = data.get("first_name", "")
         last_name = data.get("last_name", "")
         phone = data.get("phone", "")
-        tags = data.get("tags", "")   # NUEVO: etiqueta del formulario (p.ej. "FORMULARIO COTIZA")
-        note = data.get("note", "")   # NUEVO: WhatsApp + "¿Qué necesita?" que deja el formulario
-
+        tags = data.get("tags", "")
+        note = data.get("note", "")
         if not email or not customer_id:
-            print("❌ ERROR: No se recibió un email o ID de cliente válido.")
-            return jsonify({"error": "Falta email o ID de cliente"}), 400
+            print("❌ Webhook (bg): falta email o ID de cliente.", flush=True)
+            return
+        if _webhook_ya_procesado(customer_id):
+            print(f"↩️ Webhook (bg): cliente {customer_id} ya procesado hace poco → se omite (anti-duplicado).", flush=True)
+            return
 
-        # 🔍 Obtener los metacampos desde Shopify
         modelo, precio, describe_lo_que_quieres, tengo_un_plano, tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona = get_customer_metafields(customer_id)
 
-        # GUARD: solo tratamos como LEAD a los clientes que vienen de los 3 formularios reales
-        # (la nota trae 'Formulario: ...' o la etiqueta mapea a un formulario). Así el newsletter
-        # del footer u otras creaciones de cliente NO generan lead en el CRM ni correo de aviso.
-        # (Además, ahora los formularios envían DIRECTO por /lead-form, así que este webhook casi
-        #  siempre será newsletter/manual → se omite correctamente.)
+        # GUARD: solo LEAD si viene de un formulario real (nota con 'Formulario:' o tag mapeado).
         _es_lead_form = ("formulario:" in str(note or "").lower()) or bool(formulario_de_tags(tags))
         if _es_lead_form:
-            # NUEVO: además de Brevo, mandar el lead al CRM (Supabase) en tiempo real
-            enviar_a_crm(email, first_name, last_name, phone,
-                         modelo, precio, describe_lo_que_quieres, tengo_un_plano,
-                         tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona,
-                         tags=tags, note=note)
-            # NUEVO: correo de aviso del lead, con el contenido SEGÚN el tipo de formulario
-            # (COTIZA / MODELO PREDISEÑADO / PERSONALIZADO). best-effort → nunca rompe el webhook.
+            try:
+                enviar_a_crm(email, first_name, last_name, phone,
+                             modelo, precio, describe_lo_que_quieres, tengo_un_plano,
+                             tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona,
+                             tags=tags, note=note)
+            except Exception as _e:
+                print("⚠️ Webhook (bg) CRM:", _e, flush=True)
             try:
                 enviar_correo_lead(email, first_name, last_name, note, tags=tags)
             except Exception as _e:
-                print("⚠️ enviar_correo_lead falló (ignorado):", _e, flush=True)
+                print("⚠️ Webhook (bg) correo:", _e, flush=True)
         else:
-            print(f"ℹ️ Webhook: cliente {email} NO es lead de formulario (newsletter/manual) → no CRM, no correo.", flush=True)
+            print(f"ℹ️ Webhook (bg): {email} NO es lead de formulario (newsletter/manual) → no CRM, no correo.", flush=True)
 
-        # Verificar que los metacampos no estén vacíos
-        print("Valores de metacampos:", modelo, precio, describe_lo_que_quieres, tengo_un_plano, tu_direccin_actual, indica_tu_presupuesto, tipo_de_persona)
-
-        # 📌 Verificar si el contacto ya existe en Brevo
-        headers = {
-            "api-key": BREVO_API_KEY,
-            "Content-Type": "application/json"
-        }
-
-        response = requests.get(BREVO_GET_CONTACT_API_URL.format(email=email), headers=headers)
-
-        if response.status_code == 200:
-            # Si el contacto ya existe, podemos optar por actualizarlo
-            print(f"⚠️ El contacto con el correo {email} ya existe en Brevo. Se actualizará.")
-            contact_data = {
-                "email": email,
-                "attributes": {
-                    "NOMBRE": first_name,
-                    "APELLIDOS": last_name,
-                    "TELEFONO_WHATSAPP": phone,
-                    "WHATSAPP": phone,
-                    "SMS": phone,
-                    "LANDLINE_NUMBER": phone,
-                    "MODELO_CABANA": modelo,
-                    "PRECIO_CABANA": precio,
-                    "DESCRIPCION_CLIENTE": describe_lo_que_quieres,
-                    "PLANO_CLIENTE": tengo_un_plano,  # Ahora debería ser la URL pública de cualquier archivo
-                    "DIRECCION_CLIENTE": tu_direccin_actual,
-                    "PRESUPUESTO_CLIENTE": indica_tu_presupuesto,
-                    "TIPO_DE_PERSONA": tipo_de_persona
-                }
+        # Brevo (contacto) — best-effort; su resultado NO afecta la respuesta a Shopify.
+        try:
+            _hdr = {"api-key": BREVO_API_KEY, "Content-Type": "application/json"}
+            _attrs = {
+                "NOMBRE": first_name, "APELLIDOS": last_name,
+                "TELEFONO_WHATSAPP": phone, "WHATSAPP": phone, "SMS": phone, "LANDLINE_NUMBER": phone,
+                "MODELO_CABANA": modelo, "PRECIO_CABANA": precio,
+                "DESCRIPCION_CLIENTE": describe_lo_que_quieres, "PLANO_CLIENTE": tengo_un_plano,
+                "DIRECCION_CLIENTE": tu_direccin_actual, "PRESUPUESTO_CLIENTE": indica_tu_presupuesto,
+                "TIPO_DE_PERSONA": tipo_de_persona,
             }
-
-            # Actualizamos los datos del contacto existente
-            update_response = requests.put(BREVO_GET_CONTACT_API_URL.format(email=email), json=contact_data, headers=headers)
-
-            if update_response.status_code == 200:
-                return jsonify({"message": "Contacto actualizado en Brevo"}), 200
-            else:
-                return jsonify({"error": "No se pudo actualizar el contacto en Brevo", "details": update_response.text}), 400
-        elif response.status_code == 404:
-            # Si el contacto no existe, creamos uno nuevo
-            print(f"✅ El contacto con el correo {email} no existe. Se creará uno nuevo.")
-            contact_data = {
-                "email": email,
-                "attributes": {
-                    "NOMBRE": first_name,
-                    "APELLIDOS": last_name,
-                    "TELEFONO_WHATSAPP": phone,
-                    "WHATSAPP": phone,
-                    "SMS": phone,
-                    "LANDLINE_NUMBER": phone,
-                    "MODELO_CABANA": modelo,
-                    "PRECIO_CABANA": precio,
-                    "DESCRIPCION_CLIENTE": describe_lo_que_quieres,
-                    "PLANO_CLIENTE": tengo_un_plano,  # Ahora debería ser la URL pública de cualquier archivo
-                    "DIRECCION_CLIENTE": tu_direccin_actual,
-                    "PRESUPUESTO_CLIENTE": indica_tu_presupuesto,
-                    "TIPO_DE_PERSONA": tipo_de_persona
-                }
-            }
-
-            # 🚀 Enviar los datos a Brevo para crear el nuevo contacto
-            create_response = requests.post(BREVO_API_URL, json=contact_data, headers=headers)
-
-            if create_response.status_code == 201:  # El código de creación exitosa suele ser 201
-                return jsonify({"message": "Contacto creado en Brevo con metacampos"}), 201
-            else:
-                return jsonify({"error": "No se pudo crear el contacto en Brevo", "details": create_response.text}), 400
-        else:
-            return jsonify({"error": "Error al verificar si el contacto existe", "details": response.text}), 400
-
+            _r = requests.get(BREVO_GET_CONTACT_API_URL.format(email=email), headers=_hdr, timeout=15)
+            if _r.status_code == 200:
+                requests.put(BREVO_GET_CONTACT_API_URL.format(email=email),
+                             json={"email": email, "attributes": _attrs}, headers=_hdr, timeout=15)
+            elif _r.status_code == 404:
+                requests.post(BREVO_API_URL, json={"email": email, "attributes": _attrs},
+                              headers=_hdr, timeout=15)
+        except Exception as _e:
+            print("⚠️ Webhook (bg) Brevo:", _e, flush=True)
     except Exception as e:
-        print("❌ ERROR procesando el webhook:", str(e))
-        return jsonify({"error": "Error interno"}), 500
+        print("❌ Webhook (bg) error general:", e, flush=True)
+
+
+# 📩 Ruta del webhook que Shopify enviará a esta API.
+# RESPONDE 200 AL INSTANTE y procesa en SEGUNDO PLANO → Shopify nunca reintenta. (Antes, en
+# el plan free de Render, el arranque en frío superaba el timeout de Shopify → reintentos por
+# 48 h → el MISMO correo llegaba una y otra vez. Esto lo elimina.)
+@app.route('/webhook/shopify', methods=['POST'])
+def receive_webhook():
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"ok": True}), 200   # 200 igual → sin reintentos
+    try:
+        _threading.Thread(target=_procesar_webhook_shopify, args=(data,), daemon=True).start()
+    except Exception as e:
+        print("⚠️ No se pudo lanzar el hilo del webhook:", e, flush=True)
+    return jsonify({"ok": True}), 200
 
 # 📊 Webhook de RESEND: guarda en el CRM (Supabase `crm_correos`) el estado de cada
 # correo (entregado / abierto / click / rebote / spam) EN TIEMPO REAL. Aditivo y
